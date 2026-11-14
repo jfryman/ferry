@@ -156,4 +156,7 @@ def render_diff(diff: dict) -> str:
         return ""
     a = diff.get("before_header", "before")
     b = diff.get("after_header", "after")
+    # template/copy report the controller's temp source as after_header; show the target instead.
+    if "before_header" in diff and ("/.ansible/tmp/" in str(b) or "ansible-local-" in str(b)):
+        b = a
     return "".join(difflib.unified_diff(before, after, fromfile=str(a), tofile=str(b)))

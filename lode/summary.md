@@ -6,7 +6,7 @@ his day job, so the engine is kept independent of GitLab CI.
 
 ## State (2026-11-14)
 
-- v0.1.0: engine, GitLab backend, tag locks, CLI, webhook core (parse + trigger), drift metrics.
+- v0.1.1 (0.1.0 + diff header fix): engine, GitLab backend, tag locks, CLI, webhook core (parse + trigger), drift metrics.
 - Driver in use: GitLab CI in infra/ansible (`ferry plan` on MR, manual `ferry:apply`,
   scheduled `ferry drift`, `ferry unlock` on main).
 - Not deployed: the webhook service (comment-triggered `/ferry apply`). Code + tests exist.

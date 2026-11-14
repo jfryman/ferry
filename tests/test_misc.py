@@ -78,3 +78,10 @@ def test_callback_plugin_real_ansible_run_respects_no_log(tmp_path):
     assert any("+new" in json.dumps(d) or d.get("after") == "new\n" for d in changes["Change a file"].diffs)
     assert changes["Secret file"].no_log and changes["Secret file"].diffs == []
     assert "TOPSECRET" not in json.dumps([c.__dict__ for c in res.changes])
+
+
+def test_diff_header_hides_controller_temp_path():
+    from ferry.results import render_diff
+    out = render_diff({"before": "a\n", "after": "b\n", "before_header": "/etc/x.conf",
+                       "after_header": "/home/ci/.ansible/tmp/ansible-local-1abc/tmpz/x.conf.j2"})
+    assert "+++ /etc/x.conf" in out and ".ansible/tmp" not in out
