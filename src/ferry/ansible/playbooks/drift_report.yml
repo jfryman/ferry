@@ -1,0 +1,22 @@
+---
+# Shipped with ferry. Writes each host's drift metrics into node_exporter's textfile directory.
+# The only write ferry makes during a drift run; it runs only on hosts whose check-mode run finished,
+# and runs the configured pre-role first (the printer guard) so a busy host is still left alone.
+- name: Ferry drift report
+  hosts: "{{ ferry_report_hosts }}"
+  gather_facts: false
+  become: "{{ ferry_report_become | bool }}"
+  tasks:
+    - name: Run the pre-report role
+      ansible.builtin.include_role:
+        name: "{{ ferry_report_pre_role }}"
+      when: ferry_report_pre_role | length > 0
+      tags: [always]
+
+    - name: Write the drift textfile
+      ansible.builtin.copy:
+        content: "{{ ferry_drift_metrics[inventory_hostname] }}"
+        dest: "{{ ferry_textfile_dir }}/{{ ferry_textfile_name }}"
+        owner: root
+        group: root
+        mode: "0644"

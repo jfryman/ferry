@@ -1,0 +1,43 @@
+# ferry: unit tests on every MR/main push; wheel to this project's PyPI registry on vX.Y.Z tags.
+# Consumers (infra/ansible) install a pinned version with --no-deps from this registry only, so a
+# same-named package on public PyPI can never be picked up.
+
+stages:
+  - test
+  - release
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+
+.py:
+  stage: test
+  before_script:
+    - pip install --quiet --disable-pip-version-check 'ansible-core~=2.20.0' 'pytest>=8' -e .
+
+test:py3.12:
+  extends: .py
+  image: python:3.12-slim
+  script:
+    - python -m compileall -q src
+    - python -m pytest -q
+
+test:py3.13:
+  extends: .py
+  image: python:3.13-slim
+  script:
+    - python -m pytest -q
+
+publish:
+  stage: release
+  image: python:3.12-slim
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  script:
+    - test "v$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')" = "$CI_COMMIT_TAG"
+    - pip install --quiet --disable-pip-version-check build twine
+    - python -m build
+    - TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD="$CI_JOB_TOKEN"
+      python -m twine upload --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" dist/*

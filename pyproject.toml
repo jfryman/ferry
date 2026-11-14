@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ferry"
+version = "0.1.0"
+description = "Atlantis-style plan/apply/drift executor for Ansible"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["PyYAML>=6"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+ferry = "ferry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ferry = ["ansible/callback_plugins/*.py", "ansible/playbooks/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
