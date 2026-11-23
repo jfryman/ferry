@@ -79,3 +79,11 @@ the previous job's open master connection, so it ran under the previous job's ce
 job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
 ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
 per job, verified by distinct serials in the target's sshd log.
+
+## Permission check before a job exists
+Found reviewing the service (2026-11-23): `/ferry apply` from anyone was queued, and the worker did
+the checkout, the OpenBao login and the SSH signing before the engine refused it. Now both commands
+check `can_apply(commenter)` in the webhook handler, so a refused request costs one API call and no
+credential (the engine still re-checks every gate). The queue is bounded (`max_queued_jobs`, 503 when
+full), so commenters on a public repo can't pile up unlimited jobs, and `/healthz` (unauthenticated)
+no longer returns error text, which can name internal hosts and paths.

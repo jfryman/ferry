@@ -170,6 +170,24 @@ def test_comment_parsing(world):
     assert world.svc.jobs.get().inventory == "homelab"
 
 
+def test_apply_from_a_non_writer_is_refused_before_any_job(world):
+    calls = []
+    world.svc.runner_factory = lambda *a: calls.append(a)
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply", user="mallory"))[1] == \
+        "apply refused: no write access"
+    assert world.svc.jobs.empty() and not calls  # no checkout, no credentials, no runner
+    assert "needs write access" in world.comments[-1]["body"]
+
+
+def test_queue_is_bounded(world):
+    world.svc.settings.max_queued_jobs = 2
+    world.svc.__post_init__()
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[0] == 202
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[0] == 202
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan")) == (503, "queue full, try again later")
+    assert world.svc.jobs.qsize() == 2
+
+
 # ---- jobs end to end -----------------------------------------------------------------------------
 
 
@@ -245,6 +263,9 @@ def test_http_endpoints(world):
         with urllib.request.urlopen(f"{base}/healthz") as resp:
             health = json.loads(resp.read())
             assert health["ok"] and health["queued"] == 1
+        world.svc.last_job = {"job": "plan", "pr": 1, "ok": False, "error": "git fetch https://internal.example/x failed"}
+        with urllib.request.urlopen(f"{base}/healthz") as resp:
+            assert "error" not in json.loads(resp.read())["last_job"]  # unauthenticated: no error text
         bad = urllib.request.Request(f"{base}/webhook", data=body, method="POST",
                                      headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": "sha256=0"})
         with pytest.raises(urllib.error.HTTPError) as e:
