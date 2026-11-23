@@ -70,3 +70,31 @@ def test_without_openbao_only_the_remote_user():
         assert env == {"ANSIBLE_REMOTE_USER": "root"}
     with job_credentials(None) as env:
         assert env == {}
+
+
+def test_ttl_and_principal_are_requested_explicitly(settings):
+    settings.ssh_ttl, settings.ssh_principal = "20m", "ferry"
+    fake = FakeBao()
+    with job_credentials(OpenBao(settings, fake)):
+        pass
+    [sign] = [c for c in fake.calls if c[1] == "ssh-client-signer/sign/ferry"]
+    assert sign[3]["ttl"] == "20m" and sign[3]["valid_principals"] == "ferry" and sign[3]["cert_type"] == "user"
+
+
+def test_role_defaults_when_not_set(settings):
+    fake = FakeBao()
+    with job_credentials(OpenBao(settings, fake)):
+        pass
+    [sign] = [c for c in fake.calls if c[1] == "ssh-client-signer/sign/ferry"]
+    assert "ttl" not in sign[3] and "valid_principals" not in sign[3]
+
+
+def test_revoke_failure_is_logged(settings, caplog):
+    class NoRevoke(FakeBao):
+        def __call__(self, method, url, headers, body):
+            if url.endswith("auth/token/revoke-self"):
+                return 403, b'{"errors": ["permission denied"]}'
+            return super().__call__(method, url, headers, body)
+    with job_credentials(OpenBao(settings, NoRevoke())):
+        pass
+    assert "couldn't revoke" in caplog.text

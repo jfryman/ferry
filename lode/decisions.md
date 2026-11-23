@@ -79,3 +79,14 @@ the previous job's open master connection, so it ran under the previous job's ce
 job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
 ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
 per job, verified by distinct serials in the target's sshd log.
+
+## Certificate lifetime, job timeout, redaction of job credentials
+Found reviewing the service (2026-11-23). A signed certificate outlives its job: revoking the job's
+token doesn't revoke the cert. So the service can ask for an explicit `ttl` and `valid_principals`
+(FERRY_OPENBAO_SSH_TTL / _PRINCIPAL) instead of taking the role's defaults, and runs can be killed
+after FERRY_JOB_TIMEOUT_MINUTES (the whole process group, so ssh children go too). Keep the timeout
+below the cert TTL, otherwise a long apply fails on new connections halfway. The job's OpenBao token
+exists only in the per-job env, which the default Redactor (os.environ) never saw: the service now
+builds the redactor from os.environ plus the job env, and the runner echoes redacted lines (in the
+service the echo goes to the service log, not a CI log). A failed token revoke is logged, not swallowed.
+Kubernetes auth needs no code: its login body is the same `{role, jwt}` as the jwt method.

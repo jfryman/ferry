@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -76,6 +77,7 @@ class Settings:
     ssh_user: str | None = None
     drift_interval_hours: float = 0.0  # 0: no scheduled drift runs
     drift_write_report: bool = True
+    job_timeout_minutes: float = 0.0  # 0: no limit. Keep it below the SSH certificate's TTL.
 
 
 @dataclass
@@ -194,10 +196,24 @@ class Service:
         log.info("job done: %s", result)
         return result
 
-    def _engine(self, cfg, checkout: Path, env: dict) -> Engine:
+    def _redactor(self, cfg, env: dict) -> Redactor:
+        # The job's own credentials (OpenBao token, ...) live only in the per-job env, not os.environ:
+        # redact their values too, in comments and in the echoed log.
+        return Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths,
+                        environ={**os.environ, **env})
+
+    def _runner(self, cfg, checkout: Path, env: dict, red: Redactor):
         runner = self.runner_factory(checkout, cfg.guard.busy_marker, env)
-        return Engine(cfg, checkout, runner, self.vcs, self.locks, clock=self.clock,
-                      apply_how="comment `/ferry apply` once the PR is approved")
+        if isinstance(runner, AnsibleRunner):
+            runner.echo = red.text
+            if self.settings.job_timeout_minutes > 0:
+                runner.timeout = self.settings.job_timeout_minutes * 60
+        return runner
+
+    def _engine(self, cfg, checkout: Path, env: dict) -> Engine:
+        red = self._redactor(cfg, env)
+        return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
+                      clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved")
 
     def _plan_or_apply(self, job: Job) -> dict:
         main_dir, _ = self.workspace.main(self.settings.default_branch)
@@ -223,8 +239,9 @@ class Service:
         env = self.workspace.collections(main_dir)
         results = {}
         with job_credentials(self.bao, self.settings.ssh_user) as creds:
-            eng = Engine(cfg, main_dir, self.runner_factory(main_dir, cfg.guard.busy_marker, {**env, **creds}),
-                         clock=self.clock)
+            job_env = {**env, **creds}
+            red = self._redactor(cfg, job_env)
+            eng = Engine(cfg, main_dir, self._runner(cfg, main_dir, job_env, red), redactor=red, clock=self.clock)
             for inv in cfg.inventories:
                 out = eng.drift(sha, inv.name, write_report=self.settings.drift_write_report,
                                 out_dir=self.workspace.root / "drift" / inv.name)

@@ -252,3 +252,11 @@ def test_http_endpoints(world):
         assert e.value.code == 401
     finally:
         httpd.shutdown()
+
+
+def test_job_credentials_are_redacted(world, repo):
+    # The OpenBao token lives only in the per-job env, not os.environ.
+    from ferry import config as config_mod
+    cfg = config_mod.load(repo / "ferry.yaml")
+    red = world.svc._redactor(cfg, {"VAULT_TOKEN": "s.jobtoken-abcdef123456"})
+    assert "s.jobtoken-abcdef123456" not in red.text("debug: s.jobtoken-abcdef123456")

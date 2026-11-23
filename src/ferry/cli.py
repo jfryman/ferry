@@ -123,7 +123,14 @@ SERVE_HELP = """Run ferry as a GitHub App service (Atlantis-style). Settings com
   FERRY_OPENBAO_ADDR, FERRY_OPENBAO_JWT_FILE (workload identity), FERRY_OPENBAO_CA_CERT,
   FERRY_OPENBAO_AUTH_MOUNT (jwt-nomad), FERRY_OPENBAO_AUTH_ROLE (ferry),
   FERRY_OPENBAO_SSH_MOUNT (ssh-client-signer), FERRY_OPENBAO_SSH_ROLE (ferry),
-  FERRY_OPENBAO_VAULT_PASSWORD_PATH (kv-v2 data path) and _FIELD (password)
+  FERRY_OPENBAO_VAULT_PASSWORD_PATH (kv-v2 data path) and _FIELD (password),
+  FERRY_OPENBAO_SSH_TTL (e.g. 20m; default: the role's ttl), FERRY_OPENBAO_SSH_PRINCIPAL
+  (valid_principals to request; default: the role's default_user)
+  FERRY_JOB_TIMEOUT_MINUTES      kill a plan/apply/drift run after this long (0: no limit); keep it
+                                 below the certificate TTL
+  Kubernetes: OpenBao's kubernetes (or jwt) auth takes the same login, so set
+  FERRY_OPENBAO_AUTH_MOUNT=kubernetes and FERRY_OPENBAO_JWT_FILE to the service account token
+  (/var/run/secrets/kubernetes.io/serviceaccount/token, or a projected token with an audience).
 """
 
 
@@ -163,12 +170,15 @@ def build_service():
             ca_cert=_env("FERRY_OPENBAO_CA_CERT"),
             vault_password_path=_env("FERRY_OPENBAO_VAULT_PASSWORD_PATH"),
             vault_password_field=_env("FERRY_OPENBAO_VAULT_PASSWORD_FIELD", "password"),
+            ssh_ttl=_env("FERRY_OPENBAO_SSH_TTL"),
+            ssh_principal=_env("FERRY_OPENBAO_SSH_PRINCIPAL"),
         ))
     settings = Settings(
         repo=repo,
         default_branch=_env("FERRY_DEFAULT_BRANCH", "main"),
         ssh_user=_env("FERRY_SSH_USER"),
         drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
+        job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")),
     )
     return Service(
         settings=settings,

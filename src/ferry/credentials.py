@@ -14,6 +14,7 @@ Optional: with no OpenBao settings the service runs ansible with whatever SSH se
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import ssl
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, bytes]]
+log = logging.getLogger("ferry.credentials")
 
 
 class CredentialError(RuntimeError):
@@ -44,6 +46,10 @@ class OpenBaoSettings:
     ca_cert: str | None = None
     vault_password_path: str | None = None  # kv-v2 data path, e.g. infra/data/ansible/vault-password
     vault_password_field: str = "password"
+    # Asked for explicitly rather than left to the role's defaults: a certificate outlives the job and
+    # its revoked token (revoking a token doesn't revoke a cert), so keep it close to the job timeout.
+    ssh_ttl: str | None = None  # e.g. "20m"; None: the role's default ttl
+    ssh_principal: str | None = None  # valid_principals to request; None: the role's default_user
 
 
 def urllib_transport_for(ca_cert: str | None) -> Transport:
@@ -86,8 +92,12 @@ class OpenBao:
         return auth["auth"]["client_token"]
 
     def sign_ssh_key(self, token: str, public_key: str) -> str:
-        data = self._call("POST", f"{self.s.ssh_mount}/sign/{self.s.ssh_role}", token,
-                          {"public_key": public_key})
+        req = {"public_key": public_key, "cert_type": "user"}
+        if self.s.ssh_ttl:
+            req["ttl"] = self.s.ssh_ttl
+        if self.s.ssh_principal:
+            req["valid_principals"] = self.s.ssh_principal
+        data = self._call("POST", f"{self.s.ssh_mount}/sign/{self.s.ssh_role}", token, req)
         return data["data"]["signed_key"]
 
     def read_field(self, token: str, path: str, field: str) -> str:
@@ -100,8 +110,8 @@ class OpenBao:
     def revoke(self, token: str) -> None:
         try:
             self._call("POST", "auth/token/revoke-self", token)
-        except CredentialError:
-            pass  # it expires on its own
+        except CredentialError as e:
+            log.warning("couldn't revoke the job token (it expires on its own): %s", e)
 
 
 @contextmanager
