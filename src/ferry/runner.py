@@ -34,10 +34,13 @@ class Runner(Protocol):
 
 
 class AnsibleRunner:
-    def __init__(self, repo_dir: str | Path, busy_marker: str, ansible_playbook: str = "ansible-playbook"):
+    def __init__(self, repo_dir: str | Path, busy_marker: str, ansible_playbook: str = "ansible-playbook",
+                 env: dict[str, str] | None = None):
         self.repo_dir = Path(repo_dir)
         self.busy_marker = busy_marker
         self.bin = ansible_playbook
+        # Per-job environment (the service's SSH certificate, OpenBao token, vault password file).
+        self.env = dict(env or {})
 
     def command(self, req: RunRequest) -> list[str]:
         cmd = [self.bin, "-i", req.inventory, req.playbook]
@@ -67,6 +70,7 @@ class AnsibleRunner:
                     "ANSIBLE_RETRY_FILES_ENABLED": "0",
                 }
             )
+            env.update(self.env)
             env.update(req.extra_env)
             proc = subprocess.Popen(
                 self.command(req),

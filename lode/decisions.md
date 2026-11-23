@@ -58,3 +58,17 @@ James, 2026-11-23: "Locks shouldn't be tags"; Atlantis keeps them in a local fil
 service can do the same. `SQLiteLocks`: one row per inventory, primary key + BEGIN IMMEDIATE make
 acquire atomic across processes; the file lives on persistent storage (Nomad host volume), one ferry
 service per file. Tag locks remain only for the CI-only GitLab driver, which has no storage.
+
+## The service (ferry serve)
+James, 2026-11-23: one PR, working as a unit. The service owns the credential and its config:
+webhooks are HMAC-verified and deduped by delivery id; jobs run one at a time on a worker thread (the
+webhook only decides and enqueues, so GitHub's 10 s timeout is never at risk); ferry.yaml is loaded
+from the default branch and passed to the Engine while the playbooks run from the PR checkout at the
+exact head SHA (a moved PR is skipped quietly: the newer push brings its own event). The installation
+token reaches git only via GIT_CONFIG_* env (http.extraHeader), never .git/config or argv. Plan rule:
+auto-plan only for authors with write access; others wait for `/ferry plan` from a writer (a plan is
+root-level code execution). Per-job OpenBao credentials (workload-identity login, throwaway SSH key +
+CA certificate, vault password) live in a 0700 temp dir that is removed, and the token revoked, in a
+finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, atomic-terraform#230's SSH
+role, sshd login with the certificate) and the built image against a fake GitHub API plus a real git
+remote (plan, refused apply, apply, unlock).

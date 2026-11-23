@@ -42,6 +42,7 @@ class Engine:
         redactor: Redactor | None = None,
         clock=time.time,
         job_url: str = "",
+        apply_how: str | None = None,
     ):
         self.cfg = cfg
         self.repo = Path(repo_dir)
@@ -53,6 +54,8 @@ class Engine:
         )
         self.clock = clock
         self.job_url = job_url
+        # How a person triggers an apply, for the plan comment (a CI job on GitLab, a comment on GitHub).
+        self.apply_how = apply_how
 
     # ---- helpers -------------------------------------------------------------------------------
 
@@ -61,6 +64,9 @@ class Engine:
         return scope_mod.compute(
             self.repo, files, inv.path, self.cfg.playbook, self.cfg.scope.ignore, self.cfg.scope.roles_dir
         )
+
+    def _apply_how(self) -> dict:
+        return {"apply_how": self.apply_how} if self.apply_how else {}
 
     def _post(self, cr_id: int, body: str) -> None:
         if self.vcs is not None:
@@ -130,7 +136,8 @@ class Engine:
         }
         if sc.empty:
             meta["clean"] = True
-            body = render.plan_comment(inv.name, sha, sc, None, meta, self.red, self.cfg.max_comment_chars, self.job_url)
+            body = render.plan_comment(inv.name, sha, sc, None, meta, self.red, self.cfg.max_comment_chars, self.job_url,
+                                       **self._apply_how())
             self._post(cr_id, body)
             return Outcome(True, "plan", note_body=body, extra=meta)
         conflict = self._lock_conflict(inv.name, cr_id, sha, user)
@@ -139,7 +146,8 @@ class Engine:
         run = self.runner.run(RunRequest(self.cfg.playbook, inv.path, sc.limit, check=True, diff=True))
         meta["clean"] = run.clean
         meta["counts"] = run.counts()
-        body = render.plan_comment(inv.name, sha, sc, run, meta, self.red, self.cfg.max_comment_chars, self.job_url)
+        body = render.plan_comment(inv.name, sha, sc, run, meta, self.red, self.cfg.max_comment_chars, self.job_url,
+                                   **self._apply_how())
         self._post(cr_id, body)
         return Outcome(run.clean, "plan", run=run, note_body=body, extra=meta)
 
@@ -150,7 +158,7 @@ class Engine:
         if not cr.open:
             reasons.append(f"MR is {cr.state}")
         if cr.head_sha != sha:
-            reasons.append(f"this pipeline is for `{sha[:8]}` but the MR head is `{cr.head_sha[:8]}`; use the newest pipeline")
+            reasons.append(f"this run is for `{sha[:8]}` but the MR head is `{cr.head_sha[:8]}`; re-run for the newest commit")
         if cr.draft:
             reasons.append("MR is a draft")
         if cr.has_conflicts:
@@ -170,7 +178,7 @@ class Engine:
         if allowed and user not in allowed:
             reasons.append(f"`{user}` is not in apply.allowed_users")
         elif not self.vcs.can_apply(user):
-            reasons.append(f"`{user}` does not have Developer access to this project")
+            reasons.append(f"`{user}` may not apply here (needs Developer+ on GitLab, write on GitHub)")
 
         plan = self.latest_plan(cr_id, inventory)
         if plan is None:

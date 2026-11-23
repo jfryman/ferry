@@ -104,15 +104,45 @@ a single-owner homelab. For a team, run ferry as a service (the webhook driver) 
 credential itself, takes `ferry.yaml`/CI config from the default branch rather than the MR, and
 requires approval before planning MRs from untrusted authors.
 
-## Growing into a service
+## Running as a service (GitHub App)
 
-- `ferry.engine.Engine` takes a `Config`, a `VCSBackend` (`ferry.vcs.base`), a `LockStore`
-  (`ferry.locks`) and a `Runner` (`ferry.runner`). Nothing in it reads CI variables.
-- `ferry.webhook` parses GitLab note events (`/ferry plan`, `/ferry apply [inventory]`), verifies
-  the webhook secret and triggers a pipeline with `FERRY_ACTION` / `FERRY_MR_IID` / `FERRY_USER`.
-  The CLI trusts `FERRY_USER` only on `trigger` pipelines. `webhook.serve()` is a minimal stdlib
-  server to try it; the next step is running the engine in the service itself.
-- New backend = implement `VCSBackend` (8 methods) and, optionally, a `LockStore`.
+`ferry serve` is the Atlantis-style deployment: a long-running service with a GitHub App, holding
+its own credentials, so nothing in a PR can change how ferry runs.
+
+```mermaid
+sequenceDiagram
+  participant GH as GitHub
+  participant S as ferry serve
+  participant B as OpenBao
+  participant H as Hosts
+  GH->>S: webhook (signed): PR opened / synchronize, or "/ferry plan|apply"
+  S->>S: verify HMAC, dedupe, plan rule, queue (one job at a time)
+  S->>GH: fetch default branch (ferry.yaml) + PR at its head SHA (installation token)
+  S->>B: login (workload identity) -> token; sign a throwaway SSH key; vault password
+  S->>H: ansible-playbook --check --diff --limit <scope> (or apply, after the gates)
+  S->>GH: plan / apply comment as the App
+  GH->>S: PR closed -> release its locks
+```
+
+- **Config from the default branch.** ferry.yaml (scope, apply gates, policy) is read from the
+  default branch; only the playbooks come from the PR.
+- **Plan rule.** A plan runs the PR's playbooks with root SSH access (check mode, but
+  `check_mode: false`, lookups and plugins run for real), so ferry plans automatically only for
+  authors with write access. Anyone else's PR waits for `/ferry plan` from someone with write
+  access. Drafts and fork PRs aren't planned.
+- **Apply** is `/ferry apply [inventory]` and passes every gate above, against live GitHub state.
+- **Per-job credentials** (optional, `FERRY_OPENBAO_*`): an OpenBao token from the service's
+  workload identity, a throwaway ed25519 key signed by OpenBao's SSH CA, and the ansible-vault
+  password; all removed and the token revoked when the job ends.
+- **Locks** in the service's SQLite file (`FERRY_LOCK_DB`) on persistent storage; one instance.
+- **Drift** every `FERRY_DRIFT_INTERVAL_HOURS` on the default branch.
+- `GET /healthz` reports the queue and the last job. Settings: `ferry serve --help`.
+
+Deploy: `Dockerfile` (non-root image with ansible-core and git) and an example Nomad job in
+`deploy/nomad/ferry.nomad.hcl`. The GitHub App needs contents: read, pull requests and issues: write,
+and webhooks for pull_request and issue_comment, delivered to `POST /webhook` with a secret.
+
+The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unchanged.
 
 ## GitHub
 

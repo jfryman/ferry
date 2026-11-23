@@ -12,7 +12,8 @@ license = { text = "MIT" }
 dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+service = ["cryptography>=42"]
+test = ["pytest>=8", "cryptography>=42"]
 
 [project.scripts]
 ferry = "ferry.cli:main"
