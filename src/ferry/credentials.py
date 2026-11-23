@@ -126,7 +126,11 @@ def job_credentials(bao: OpenBao | None, ssh_user: str | None = None,
         env = {
             # ssh finds id_ed25519-cert.pub next to the key on its own.
             "ANSIBLE_PRIVATE_KEY_FILE": str(key),
-            "ANSIBLE_SSH_ARGS": "-o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=60s",
+            "ANSIBLE_SSH_ARGS": "-o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=30s",
+            # Connection sharing stays inside this job: with ansible's default ~/.ansible/cp, the next
+            # job would reuse this job's still-open master connection, i.e. run under this job's
+            # certificate after its credentials were gone (found in the local lab, Nov 23).
+            "ANSIBLE_SSH_CONTROL_PATH_DIR": str(tmp / "cp"),
             # For lookups (community.hashi_vault reads these).
             "VAULT_ADDR": bao.s.addr,
             "VAULT_TOKEN": token,

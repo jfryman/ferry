@@ -139,7 +139,9 @@ sequenceDiagram
 - `GET /healthz` reports the queue and the last job. Settings: `ferry serve --help`.
 
 Deploy: `Dockerfile` (non-root image with ansible-core and git) and an example Nomad job in
-`deploy/nomad/ferry.nomad.hcl`. The GitHub App needs contents: read, pull requests and issues: write,
+`deploy/nomad/ferry.nomad.hcl`. **To see the whole loop working locally** (OpenBao, Nomad-style
+workload identity, SSH certificates, a managed host, a fake GitHub), run `deploy/local/up.sh` and
+follow `deploy/local/README.md`. The GitHub App needs contents: read, pull requests and issues: write,
 and webhooks for pull_request and issue_comment, delivered to `POST /webhook` with a secret.
 
 The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unchanged.

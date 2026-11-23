@@ -72,3 +72,10 @@ CA certificate, vault password) live in a 0700 temp dir that is removed, and the
 finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, atomic-terraform#230's SSH
 role, sshd login with the certificate) and the built image against a fake GitHub API plus a real git
 remote (plan, refused apply, apply, unlock).
+
+## Per-job SSH connection sharing
+Found in the local lab (2026-11-23): with Ansible's default ControlPath (~/.ansible/cp) a job reused
+the previous job's open master connection, so it ran under the previous job's certificate after that
+job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
+ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
+per job, verified by distinct serials in the target's sshd log.

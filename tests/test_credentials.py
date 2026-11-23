@@ -51,6 +51,8 @@ def test_job_gets_a_signed_key_token_and_vault_password_then_everything_goes(set
         assert env["VAULT_TOKEN"] == env["ANSIBLE_HASHI_VAULT_TOKEN"] == "s.job"
         assert env["VAULT_CACERT"] == "/ca.pem" and env["ANSIBLE_REMOTE_USER"] == "root"
         assert "IdentitiesOnly=yes" in env["ANSIBLE_SSH_ARGS"]
+        # SSH connection sharing is per job, never reused by the next job.
+        assert env["ANSIBLE_SSH_CONTROL_PATH_DIR"].startswith(tmp + os.sep)
     assert not os.path.exists(tmp)
     assert fake.calls[-1][1] == "auth/token/revoke-self"
 

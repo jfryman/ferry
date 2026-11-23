@@ -7,3 +7,4 @@
 - `tmp/`: session scratch (git-ignored)
 
 User-facing behavior (gates, locks, drift metrics, threat model) is in the top-level README.
+- `deploy/local/README.md`: the local lab (full service loop, OpenBao, SSH certificates), how it maps to production, things to try

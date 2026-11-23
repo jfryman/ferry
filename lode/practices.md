@@ -10,3 +10,7 @@
   Consumers pin the version and install with `--no-deps` from that registry only (name clash with
   a public `ferry` package).
 - Local: `pip install -e . 'ansible-core~=2.20.0' pytest && python -m pytest -q`.
+- **The local lab is the integration test.** `deploy/local/up.sh` stands up ferry serve + OpenBao
+  (Nomad-style JWT, SSH CA, vault password) + an sshd host trusting the CA + a fake GitHub; walk the
+  loop with `deploy/local/lab.sh` (guide: `deploy/local/README.md`). Re-run it after any change to
+  the service, credentials or workspace code. It caught the cross-job SSH ControlPath leak (Nov 23).
