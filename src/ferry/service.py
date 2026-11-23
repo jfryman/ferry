@@ -18,6 +18,9 @@ Plan rule: a plan runs the PR's playbooks (check mode, but check_mode: false tas
 plugins run for real) with root SSH access, so ferry plans automatically only for authors with write
 access; anyone else's PR waits for a `/ferry plan` comment from someone with write access.
 ferry.yaml comes from the default branch, so a PR can't change these rules.
+
+GitLab: gitlab_service.GitLabService is the same service with GitLab's webhook intake; everything
+after the decision (the queue, the worker, the engine) is shared.
 """
 
 from __future__ import annotations
@@ -71,7 +74,8 @@ class Job:
 
 @dataclass
 class Settings:
-    repo: str  # OWNER/NAME this service is for
+    repo: str  # OWNER/NAME (GitLab: path_with_namespace) this service is for
+    project_id: str | None = None  # GitLab: the numeric project id, also accepted in webhooks
     default_branch: str = "main"
     ssh_user: str | None = None
     drift_interval_hours: float = 0.0  # 0: no scheduled drift runs
@@ -80,6 +84,10 @@ class Settings:
 
 @dataclass
 class Service:
+    # How the waiting note names things; the GitLab service says MR / Developer access.
+    noun = "PR"
+    access = "write access"
+
     settings: Settings
     vcs: GitHubBackend
     locks: LockStore
@@ -97,6 +105,11 @@ class Service:
         self.last_job: dict = {}
 
     # ---- webhook (fast path: decide and enqueue) ------------------------------------------------
+
+    def handle_request(self, headers, body: bytes) -> tuple[int, str]:
+        """The HTTP entry point: pick the code host's headers, then handle()."""
+        return self.handle(headers.get("X-GitHub-Event", ""), headers.get("X-GitHub-Delivery", ""),
+                           headers.get("X-Hub-Signature-256"), body)
 
     def handle(self, event: str, delivery: str, signature: str | None, body: bytes) -> tuple[int, str]:
         if not verify_signature(self.secret, body, signature):
@@ -163,8 +176,9 @@ class Service:
         if any(marker in n.body for n in self.vcs.list_notes(number) if n.author == self.vcs.bot_username()):
             return
         self.vcs.post_note(number, (
-            f"ferry doesn't plan automatically for authors without write access (@{author}): a plan runs "
-            f"this PR's playbooks against the hosts. Someone with write access can comment `/ferry plan`.\n\n{marker}"))
+            f"ferry doesn't plan automatically for authors without {self.access} (@{author}): a plan runs "
+            f"this {self.noun}'s playbooks against the hosts. Someone with {self.access} can comment "
+            f"`/ferry plan`.\n\n{marker}"))
 
     # ---- worker (slow path: one job at a time) --------------------------------------------------
 
@@ -284,9 +298,7 @@ def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
             if length <= 0 or length > max_body:
                 return self._send(413 if length > max_body else 400, "bad length")
             body = self.rfile.read(length)
-            status, text = service.handle(self.headers.get("X-GitHub-Event", ""),
-                                          self.headers.get("X-GitHub-Delivery", ""),
-                                          self.headers.get("X-Hub-Signature-256"), body)
+            status, text = service.handle_request(self.headers, body)
             self._send(status, text)
 
         def log_message(self, fmt, *args):

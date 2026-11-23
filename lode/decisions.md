@@ -79,3 +79,18 @@ the previous job's open master connection, so it ran under the previous job's ce
 job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
 ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
 per job, verified by distinct serials in the target's sshd log.
+
+## ferry serve for GitLab
+Same service, a different intake (2026-11-23): `GitLabService` subclasses `Service` and overrides only
+the webhook fast path (X-Gitlab-Token compared in constant time, since GitLab doesn't sign bodies;
+dedupe on Idempotency-Key, else X-Gitlab-Event-UUID; Merge Request / Note hooks to the same Jobs).
+The HTTP handler calls `service.handle_request(headers, body)` so each backend reads its own
+headers. Workspace takes the change ref template and git user (refs/merge-requests/<n>/head,
+oauth2). Approvals of the current head only: GitLab has no commit on an approval, so
+`GitLabBackend.approvers` compares `approved_at` with the created_at of the newest MR diff version
+whose head is the MR SHA; without `approved_at` it trusts approvals only when the project resets
+them on push, else counts none (benefits the CI driver too). `unchecked`/`checking`/`preparing`
+refuse (GitHub's `unknown`). `ci_must_pass`/`ci_still_running` block in the service
+(`pipeline_blocks=True`, like GitHub required checks) but not in the CI driver, whose apply job runs
+inside that pipeline. Token: project access token, Developer, api + read_repository.
+
