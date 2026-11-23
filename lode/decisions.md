@@ -41,3 +41,15 @@ Drift raises alerts; auto-apply of main is not implemented (James to decide).
 
 ## No third-party deps beyond PyYAML
 GitLab API via urllib so the package installs anywhere Ansible does.
+
+## GitHub backend, for an Atlantis-style service
+Atomic runs ferry as a long-running service on Nomad with a GitHub App (James, 2026-11-23): webhooks
+in, clone with the App's installation token at the PR head SHA, comments as the App. In GitHub Actions
+a `pull_request` workflow comes from the PR branch, so a PR could take the job's credentials; the
+service keeps the credential and its config on the default branch. `GitHubBackend` is token-agnostic
+(a string, or a callable returning a fresh installation token); minting the App token (RS256 JWT)
+stays in the service so the library keeps its stdlib-only dependencies. Approvals count only the
+latest decisive review per user and only for the current head SHA (COMMENTED doesn't undo an
+approval; a stale approval doesn't count). `mergeable_state` "unknown" refuses apply rather than
+guess. Locks are annotated tags made in two steps (tag object, then the ref); creating the ref is the
+atomic step (422 if held).

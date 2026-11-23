@@ -9,7 +9,12 @@
 
 GitLab context comes from the standard CI variables (CI_API_V4_URL, CI_PROJECT_ID,
 CI_MERGE_REQUEST_IID, CI_COMMIT_SHA, GITLAB_USER_LOGIN, CI_JOB_URL) plus FERRY_GITLAB_TOKEN.
-Flags override them, so the same commands work from a laptop or a service.
+
+GitHub (--vcs github or FERRY_VCS=github): FERRY_GITHUB_TOKEN, the repo as OWNER/NAME
+(--project, FERRY_GITHUB_REPO or GITHUB_REPOSITORY), FERRY_GITHUB_BOT (the App's "<slug>[bot]"
+login, needed with an App installation token) and optionally GITHUB_API_URL. The PR, commit and
+user come from --mr/--sha/--user (or FERRY_MR_IID). Flags override the environment, so the same
+commands work from a laptop or a service.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ from pathlib import Path
 
 from . import config as config_mod
 from .engine import Engine
-from .locks import GitLabTagLocks
+from .locks import GitHubTagLocks, GitLabTagLocks
 from .runner import AnsibleRunner
+from .vcs.github import API as GITHUB_API
+from .vcs.github import GitHubBackend, GitHubClient
 from .vcs.gitlab import GitLabBackend, GitLabClient
 
 
@@ -32,12 +39,28 @@ def _env(name: str, default: str | None = None) -> str | None:
     return v if v else default
 
 
+def _vcs_kind(args) -> str:
+    kind = (getattr(args, "vcs", None) or _env("FERRY_VCS", "gitlab")).lower()
+    if kind not in ("gitlab", "github"):
+        sys.exit(f"ferry: unknown VCS {kind!r} (gitlab or github)")
+    return kind
+
+
 def build_engine(args, need_vcs: bool = True) -> Engine:
     repo = Path(args.repo).resolve()
     cfg = config_mod.load(repo / args.config)
     runner = AnsibleRunner(repo, cfg.guard.busy_marker)
     vcs = locks = None
-    if need_vcs:
+    if need_vcs and _vcs_kind(args) == "github":
+        repo_name = args.project or _env("FERRY_GITHUB_REPO") or _env("GITHUB_REPOSITORY")
+        token = _env("FERRY_GITHUB_TOKEN")
+        missing = [n for n, v in (("FERRY_GITHUB_REPO/--project", repo_name), ("FERRY_GITHUB_TOKEN", token)) if not v]
+        if missing:
+            sys.exit(f"ferry: missing {', '.join(missing)}")
+        client = GitHubClient(token, api_url=args.api_url or _env("GITHUB_API_URL", GITHUB_API))
+        vcs = GitHubBackend(client, repo_name, bot_login=_env("FERRY_GITHUB_BOT"))
+        locks = GitHubTagLocks(client, repo_name)
+    elif need_vcs:
         api = args.api_url or _env("CI_API_V4_URL")
         project = args.project or _env("CI_PROJECT_ID")
         token = _env("FERRY_GITLAB_TOKEN")
@@ -56,12 +79,15 @@ def _mr_args(args) -> tuple[int, str, str]:
     sha = args.sha or _env("CI_COMMIT_SHA")
     # Triggered pipelines (comment webhook) run as the trigger owner; the commenter is FERRY_USER.
     # Only trust FERRY_USER on trigger pipelines, so a manual job can't claim to be someone else.
-    if _env("CI_PIPELINE_SOURCE") == "trigger":
+    if _vcs_kind(args) == "github":
+        # No CI variables to trust here: the service (or a person at a terminal) passes --user.
+        user = args.user or "unknown"
+    elif _env("CI_PIPELINE_SOURCE") == "trigger":
         user = args.user or _env("FERRY_USER") or "unknown"
     else:
         user = args.user or _env("GITLAB_USER_LOGIN") or "unknown"
     if not mr or not sha:
-        sys.exit("ferry: needs an MR (--mr or CI_MERGE_REQUEST_IID) and a commit (--sha or CI_COMMIT_SHA)")
+        sys.exit("ferry: needs an MR/PR (--mr, CI_MERGE_REQUEST_IID or FERRY_MR_IID) and a commit (--sha or CI_COMMIT_SHA)")
     return int(mr), sha, user
 
 
@@ -79,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", default=".", help="config repo checkout (default: cwd)")
     p.add_argument("--config", default="ferry.yaml")
     p.add_argument("--api-url")
-    p.add_argument("--project")
+    p.add_argument("--project", help="GitLab project id/path, or GitHub OWNER/NAME")
+    p.add_argument("--vcs", choices=("gitlab", "github"), help="code host (default: FERRY_VCS or gitlab)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     for name in ("plan", "apply"):

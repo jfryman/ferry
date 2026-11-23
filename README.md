@@ -3,7 +3,7 @@
 Atlantis-style plan/apply for Ansible. An MR gets a check-mode plan (with diffs) as a comment; an
 approved MR whose plan is current can be applied; a scheduled drift run reports hosts that no
 longer match the default branch. GitLab CI is the first driver; the engine is written so a webhook
-service (and a GitHub backend) can be added without touching it.
+service can drive it without changes. GitLab and GitHub backends are included (`--vcs`).
 
 ```
 ferry plan      # MR pipeline: check --diff on the hosts the MR affects, comment the plan, take the lock
@@ -111,6 +111,23 @@ requires approval before planning MRs from untrusted authors.
   The CLI trusts `FERRY_USER` only on `trigger` pipelines. `webhook.serve()` is a minimal stdlib
   server to try it; the next step is running the engine in the service itself.
 - New backend = implement `VCSBackend` (8 methods) and, optionally, a `LockStore`.
+
+## GitHub
+
+`--vcs github` (or `FERRY_VCS=github`) uses `ferry.vcs.github.GitHubBackend` and `GitHubTagLocks`:
+
+| Needs | From |
+|---|---|
+| token (contents read, pull requests + issues write, contents write for lock tags) | `FERRY_GITHUB_TOKEN` |
+| repo `OWNER/NAME` | `--project`, `FERRY_GITHUB_REPO` or `GITHUB_REPOSITORY` |
+| ferry's own login, for trusting plan markers | `FERRY_GITHUB_BOT` (an App's `<slug>[bot]`); otherwise `GET /user` |
+| PR, commit, user | `--mr`, `--sha`, `--user` (no CI variables are trusted for the user) |
+
+Mapping: notes are issue comments; approvals are the latest decisive review per user that approves
+the current head; "blocked" merge states are GitHub's `mergeable_state` `dirty`, `blocked`, `behind`,
+`draft` and `unknown`; applying needs `write`, `maintain` or `admin`. Locks are annotated tags
+`ferry-lock-<inventory>`; exclude them from `on: push` triggers. Intended deployment is a service
+holding a GitHub App (see the threat model above), not `pull_request` workflows.
 
 ## Development
 
