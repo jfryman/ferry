@@ -4,21 +4,24 @@ A plan takes the lock for its inventory and holds it until the MR merges or clos
 can neither plan nor apply against the same hosts in between. A lock whose holder MR is no longer
 open is stale and gets taken over, so a forgotten MR never wedges the repo.
 
-GitLabTagLocks (and GitHubTagLocks, the same on GitHub) stores a lock as a lightweight-annotated tag `ferry-lock-<inventory>`: tag creation is
+GitLabTagLocks stores a lock as a lightweight-annotated tag `ferry-lock-<inventory>`: tag creation is
 atomic on the server (a second create fails), the message carries the holder, and anyone can see who
 holds the lock in the repo's tag list. Exclude these tags from pipelines (workflow rules).
-A service deployment can swap in a database-backed LockStore without touching the engine.
+That suits the CI-only GitLab driver, which has no storage of its own. A service keeps locks in its
+own store instead (SQLiteLocks, a file like Atlantis's BoltDB), outside the code host.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import urllib.parse
+from contextlib import closing
+from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Protocol
 
-from .vcs.github import GitHubClient, GitHubError
 from .vcs.gitlab import GitLabClient, GitLabError
 
 TAG_PREFIX = "ferry-lock-"
@@ -113,65 +116,58 @@ class GitLabTagLocks:
         return True
 
 
-class GitHubTagLocks:
-    """Same idea as GitLabTagLocks on GitHub: an annotated tag `ferry-lock-<inventory>`.
+class SQLiteLocks:
+    """Locks in a SQLite file the service owns, like Atlantis's BoltDB file in its data dir.
 
-    GitHub makes a tag in two steps: a tag object (carrying the holder as its message), then the ref
-    refs/tags/ferry-lock-<inventory> pointing at it. Creating the ref is the atomic step (422 if it
-    exists); a tag object left behind by a lost race is unreferenced and harmless.
+    Lives outside the code host, so locks need no repo permissions and leave nothing in the repo. A
+    row per inventory; the primary key makes acquiring atomic, and BEGIN IMMEDIATE serializes
+    writers across processes (a webhook handler and a CLI run on the same host). Keep the file on
+    persistent storage (a Nomad host volume): losing it frees every lock. One ferry service per file.
     """
 
-    def __init__(self, client: GitHubClient, repo: str):
-        self.client = client
-        owner, name = repo.split("/")
-        self._r = f"/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(name, safe='')}"
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS locks ("
+                " key TEXT PRIMARY KEY, holder INTEGER NOT NULL, sha TEXT NOT NULL,"
+                " user TEXT NOT NULL, since REAL NOT NULL)"
+            )
 
-    def _ref(self, key: str) -> str:
-        return f"tags/{TAG_PREFIX}{key}"
+    def _connect(self) -> sqlite3.Connection:
+        # isolation_level=None: we issue BEGIN IMMEDIATE ourselves. timeout waits out another writer.
+        return sqlite3.connect(self.path, timeout=30, isolation_level=None)
 
     def get(self, key):
-        try:
-            ref = self.client.request("GET", f"{self._r}/git/ref/{self._ref(key)}")
-        except GitHubError as e:
-            if e.status == 404:
-                return None
-            raise
-        obj = ref.get("object", {})
-        message, target = "", obj.get("sha", "")
-        if obj.get("type") == "tag":
-            tag = self.client.request("GET", f"{self._r}/git/tags/{obj['sha']}")
-            message, target = tag.get("message", ""), tag.get("object", {}).get("sha", target)
-        try:
-            return Lock(**json.loads(message or "{}"))
-        except (TypeError, ValueError):
-            # Unreadable lock: treat as held by nobody we know (id 0), never silently free.
-            return Lock(key=key, holder=0, sha=target, user="?", since=0)
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT key, holder, sha, user, since FROM locks WHERE key = ?", (key,)).fetchone()
+        return Lock(*row) if row else None
 
     def try_acquire(self, lock):
-        tag = self.client.request(
-            "POST",
-            f"{self._r}/git/tags",
-            data={"tag": f"{TAG_PREFIX}{lock.key}", "message": json.dumps(asdict(lock)), "object": lock.sha,
-                  "type": "commit"},
-        )
-        try:
-            self.client.request(
-                "POST", f"{self._r}/git/refs", data={"ref": f"refs/{self._ref(lock.key)}", "sha": tag["sha"]}
-            )
-            return None
-        except GitHubError as e:
-            if e.status == 422:  # Reference already exists
-                cur = self.get(lock.key)
-                if cur is not None:
-                    return cur
-            raise
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(
+                    "SELECT key, holder, sha, user, since FROM locks WHERE key = ?", (lock.key,)
+                ).fetchone()
+                if row:
+                    db.execute("ROLLBACK")
+                    return Lock(*row)
+                db.execute(
+                    "INSERT INTO locks (key, holder, sha, user, since) VALUES (?, ?, ?, ?, ?)",
+                    (lock.key, lock.holder, lock.sha, lock.user, lock.since),
+                )
+                db.execute("COMMIT")
+                return None
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
 
     def release(self, key, holder):
-        cur = self.get(key)
-        if cur is None or cur.holder != holder:
-            return False
-        self.client.request("DELETE", f"{self._r}/git/refs/{self._ref(key)}")
-        return True
+        with closing(self._connect()) as db:
+            cur = db.execute("DELETE FROM locks WHERE key = ? AND holder = ?", (key, holder))
+            return cur.rowcount == 1
 
 
 def new_lock(key: str, holder: int, sha: str, user: str) -> Lock:

@@ -12,7 +12,8 @@ CI_MERGE_REQUEST_IID, CI_COMMIT_SHA, GITLAB_USER_LOGIN, CI_JOB_URL) plus FERRY_G
 
 GitHub (--vcs github or FERRY_VCS=github): FERRY_GITHUB_TOKEN, the repo as OWNER/NAME
 (--project, FERRY_GITHUB_REPO or GITHUB_REPOSITORY), FERRY_GITHUB_BOT (the App's "<slug>[bot]"
-login, needed with an App installation token) and optionally GITHUB_API_URL. The PR, commit and
+login, needed with an App installation token), FERRY_LOCK_DB (the service's lock file, kept
+on persistent storage) and optionally GITHUB_API_URL. The PR, commit and
 user come from --mr/--sha/--user (or FERRY_MR_IID). Flags override the environment, so the same
 commands work from a laptop or a service.
 """
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from . import config as config_mod
 from .engine import Engine
-from .locks import GitHubTagLocks, GitLabTagLocks
+from .locks import GitLabTagLocks, SQLiteLocks
 from .runner import AnsibleRunner
 from .vcs.github import API as GITHUB_API
 from .vcs.github import GitHubBackend, GitHubClient
@@ -54,12 +55,14 @@ def build_engine(args, need_vcs: bool = True) -> Engine:
     if need_vcs and _vcs_kind(args) == "github":
         repo_name = args.project or _env("FERRY_GITHUB_REPO") or _env("GITHUB_REPOSITORY")
         token = _env("FERRY_GITHUB_TOKEN")
-        missing = [n for n, v in (("FERRY_GITHUB_REPO/--project", repo_name), ("FERRY_GITHUB_TOKEN", token)) if not v]
+        lock_db = getattr(args, "lock_db", None) or _env("FERRY_LOCK_DB")
+        missing = [n for n, v in (("FERRY_GITHUB_REPO/--project", repo_name), ("FERRY_GITHUB_TOKEN", token),
+                                  ("FERRY_LOCK_DB/--lock-db", lock_db)) if not v]
         if missing:
             sys.exit(f"ferry: missing {', '.join(missing)}")
         client = GitHubClient(token, api_url=args.api_url or _env("GITHUB_API_URL", GITHUB_API))
         vcs = GitHubBackend(client, repo_name, bot_login=_env("FERRY_GITHUB_BOT"))
-        locks = GitHubTagLocks(client, repo_name)
+        locks = SQLiteLocks(lock_db)
     elif need_vcs:
         api = args.api_url or _env("CI_API_V4_URL")
         project = args.project or _env("CI_PROJECT_ID")
@@ -107,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--api-url")
     p.add_argument("--project", help="GitLab project id/path, or GitHub OWNER/NAME")
     p.add_argument("--vcs", choices=("gitlab", "github"), help="code host (default: FERRY_VCS or gitlab)")
+    p.add_argument("--lock-db", help="GitHub: the service's lock file (default: FERRY_LOCK_DB)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     for name in ("plan", "apply"):

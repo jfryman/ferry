@@ -51,5 +51,10 @@ service keeps the credential and its config on the default branch. `GitHubBacken
 stays in the service so the library keeps its stdlib-only dependencies. Approvals count only the
 latest decisive review per user and only for the current head SHA (COMMENTED doesn't undo an
 approval; a stale approval doesn't count). `mergeable_state` "unknown" refuses apply rather than
-guess. Locks are annotated tags made in two steps (tag object, then the ref); creating the ref is the
-atomic step (422 if held).
+guess.
+
+## Service locks in the service's own file, not the repo
+James, 2026-11-23: "Locks shouldn't be tags"; Atlantis keeps them in a local file (BoltDB) and the
+service can do the same. `SQLiteLocks`: one row per inventory, primary key + BEGIN IMMEDIATE make
+acquire atomic across processes; the file lives on persistent storage (Nomad host volume), one ferry
+service per file. Tag locks remain only for the CI-only GitLab driver, which has no storage.

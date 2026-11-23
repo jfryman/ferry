@@ -52,7 +52,9 @@ All re-checked inside the apply job, against live GitLab state:
 ## Locks
 
 One lock per inventory, taken at plan time and held until the MR merges or closes (Atlantis
-semantics), so two MRs can't interleave plans and applies on the same hosts. GitLab backend: an
+semantics), so two MRs can't interleave plans and applies on the same hosts. A service keeps them in
+its own file (`SQLiteLocks`, `FERRY_LOCK_DB`; Atlantis uses a BoltDB file the same way). CI-only
+GitLab driver, which has no storage of its own: an
 annotated tag `ferry-lock-<inventory>` (creation is atomic server-side; the message holds the holder).
 A lock whose MR is no longer open is stale and taken over automatically. Exclude
 `ferry-lock-*` tags from pipelines in the consumer's `workflow:rules`. Use a CI `resource_group`
@@ -114,20 +116,22 @@ requires approval before planning MRs from untrusted authors.
 
 ## GitHub
 
-`--vcs github` (or `FERRY_VCS=github`) uses `ferry.vcs.github.GitHubBackend` and `GitHubTagLocks`:
+`--vcs github` (or `FERRY_VCS=github`) uses `ferry.vcs.github.GitHubBackend` and `SQLiteLocks`:
 
 | Needs | From |
 |---|---|
-| token (contents read, pull requests + issues write, contents write for lock tags) | `FERRY_GITHUB_TOKEN` |
+| token (contents read, pull requests + issues write) | `FERRY_GITHUB_TOKEN` |
+| the service's lock file, on persistent storage | `FERRY_LOCK_DB` or `--lock-db` |
 | repo `OWNER/NAME` | `--project`, `FERRY_GITHUB_REPO` or `GITHUB_REPOSITORY` |
 | ferry's own login, for trusting plan markers | `FERRY_GITHUB_BOT` (an App's `<slug>[bot]`); otherwise `GET /user` |
 | PR, commit, user | `--mr`, `--sha`, `--user` (no CI variables are trusted for the user) |
 
 Mapping: notes are issue comments; approvals are the latest decisive review per user that approves
 the current head; "blocked" merge states are GitHub's `mergeable_state` `dirty`, `blocked`, `behind`,
-`draft` and `unknown`; applying needs `write`, `maintain` or `admin`. Locks are annotated tags
-`ferry-lock-<inventory>`; exclude them from `on: push` triggers. Intended deployment is a service
-holding a GitHub App (see the threat model above), not `pull_request` workflows.
+`draft` and `unknown`; applying needs `write`, `maintain` or `admin`. Locks live in the service's
+own SQLite file (like Atlantis's BoltDB), not in the repo: no tags, no repo write access, and one
+ferry service per file. Intended deployment is a service holding a GitHub App (see the threat model
+above), not `pull_request` workflows.
 
 ## Development
 

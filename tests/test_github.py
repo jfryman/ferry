@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from ferry.locks import GitHubTagLocks, new_lock
+from ferry.locks import SQLiteLocks, new_lock
 from ferry.vcs.base import VCSBackend
 from ferry.vcs.github import GitHubBackend, GitHubClient, GitHubError
 
@@ -12,13 +12,11 @@ R = "/repos/acme/ansible"
 
 
 class FakeGitHub:
-    """Routes (method, path-without-query) to handlers; records calls. Mimics GitHub's git refs/tags."""
+    """Routes (method, path-without-query) to handlers; records calls."""
 
     def __init__(self):
         self.calls = []
         self.routes = {}
-        self.refs = {}  # "tags/ferry-lock-x" -> {"type": "tag", "sha": tag_sha}
-        self.tag_objects = {}  # tag_sha -> tag object
         self.tokens_seen = []
 
     def __call__(self, method, url, headers, body):
@@ -29,41 +27,11 @@ class FakeGitHub:
         path = parsed.path
         data = json.loads(body) if body else None
         self.calls.append((method, path, parse_qs(parsed.query), data))
-        if path.startswith(f"{R}/git/"):
-            return self._git(method, path[len(f"{R}/git/"):], data)
         handler = self.routes.get((method, path))
         if handler is None:
             return 404, b'{"message":"Not Found"}'
         status, obj = handler(parse_qs(parsed.query), data) if callable(handler) else (200, handler)
         return status, json.dumps(obj).encode()
-
-    def _git(self, method, rest, data):
-        if method == "POST" and rest == "tags":
-            sha = f"tagsha{len(self.tag_objects) + 1}"
-            self.tag_objects[sha] = {"sha": sha, "tag": data["tag"], "message": data["message"],
-                                     "object": {"sha": data["object"], "type": data["type"]}}
-            return 201, json.dumps(self.tag_objects[sha]).encode()
-        if method == "POST" and rest == "refs":
-            name = data["ref"][len("refs/"):]
-            if name in self.refs:
-                return 422, b'{"message":"Reference already exists"}'
-            self.refs[name] = {"type": "tag", "sha": data["sha"]}
-            return 201, json.dumps({"ref": data["ref"], "object": self.refs[name]}).encode()
-        if method == "GET" and rest.startswith("ref/"):
-            name = rest[len("ref/"):]
-            if name not in self.refs:
-                return 404, b'{"message":"Not Found"}'
-            return 200, json.dumps({"ref": f"refs/{name}", "object": self.refs[name]}).encode()
-        if method == "GET" and rest.startswith("tags/"):
-            obj = self.tag_objects.get(rest[len("tags/"):])
-            return (200, json.dumps(obj).encode()) if obj else (404, b'{"message":"Not Found"}')
-        if method == "DELETE" and rest.startswith("refs/"):
-            name = rest[len("refs/"):]
-            if name not in self.refs:
-                return 422, b'{"message":"Reference does not exist"}'
-            del self.refs[name]
-            return 204, b""
-        return 404, b'{"message":"Not Found"}'
 
 
 def pr(number=7, sha="abc", state="open", merged=False, draft=False, mergeable=True, mergeable_state="clean"):
@@ -221,62 +189,27 @@ def test_change_requests_for_commit(gh):
     assert be.change_requests_for_commit("deadbeef") == [4, 9]
 
 
-# Locks
-
-
-@pytest.fixture
-def locks(gh):
-    fake, client, _ = gh
-    return fake, GitHubTagLocks(client, "acme/ansible")
-
-
-def test_lock_acquire_get_release(locks):
-    fake, store = locks
-    assert store.get("prod") is None
-    assert store.try_acquire(new_lock("prod", 7, "abc", "pip")) is None
-    held = store.get("prod")
-    assert (held.holder, held.sha, held.user) == (7, "abc", "pip")
-    assert "tags/ferry-lock-prod" in fake.refs
-    assert store.release("prod", 8) is False  # not the holder
-    assert store.release("prod", 7) is True
-    assert store.get("prod") is None
-
-
-def test_second_acquire_returns_the_holder(locks):
-    _, store = locks
-    store.try_acquire(new_lock("prod", 7, "abc", "pip"))
-    conflict = store.try_acquire(new_lock("prod", 8, "def", "ana"))
-    assert conflict is not None and conflict.holder == 7
-
-
-def test_unreadable_lock_is_held_not_free(locks):
-    fake, store = locks
-    fake.tag_objects["junk"] = {"sha": "junk", "message": "not json", "object": {"sha": "c0ffee"}}
-    fake.refs["tags/ferry-lock-prod"] = {"type": "tag", "sha": "junk"}
-    held = store.get("prod")
-    assert held.holder == 0 and held.sha == "c0ffee"
-    assert store.try_acquire(new_lock("prod", 7, "abc", "pip")).holder == 0
-
-
 # CLI wiring
 
 
 def _cli_args(repo, **kw):
     import argparse
-    base = dict(repo=str(repo), config="ferry.yaml", api_url=None, project=None, vcs=None,
+    base = dict(repo=str(repo), config="ferry.yaml", api_url=None, project=None, vcs=None, lock_db=None,
                 mr=None, sha=None, user=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_cli_builds_github_backend(repo, monkeypatch):
+def test_cli_builds_github_backend(repo, monkeypatch, tmp_path):
     from ferry import cli
+    monkeypatch.setenv("FERRY_LOCK_DB", str(tmp_path / "state" / "locks.db"))
     monkeypatch.setenv("FERRY_VCS", "github")
     monkeypatch.setenv("FERRY_GITHUB_TOKEN", "tok")
     monkeypatch.setenv("GITHUB_REPOSITORY", "acme/ansible")
     monkeypatch.setenv("FERRY_GITHUB_BOT", "ferry-acme[bot]")
     eng = cli.build_engine(_cli_args(repo))
-    assert isinstance(eng.vcs, GitHubBackend) and isinstance(eng.locks, GitHubTagLocks)
+    assert isinstance(eng.vcs, GitHubBackend) and isinstance(eng.locks, SQLiteLocks)
+    assert eng.locks.path == tmp_path / "state" / "locks.db"
     assert eng.vcs.bot_username() == "ferry-acme[bot]"
 
 
@@ -284,7 +217,8 @@ def test_cli_github_flag_overrides_env_and_reports_missing(repo, monkeypatch):
     from ferry import cli
     monkeypatch.delenv("FERRY_VCS", raising=False)
     monkeypatch.delenv("FERRY_GITHUB_TOKEN", raising=False)
-    with pytest.raises(SystemExit, match="FERRY_GITHUB_TOKEN"):
+    monkeypatch.delenv("FERRY_LOCK_DB", raising=False)
+    with pytest.raises(SystemExit, match="FERRY_GITHUB_TOKEN.*FERRY_LOCK_DB"):
         cli.build_engine(_cli_args(repo, vcs="github", project="acme/ansible"))
 
 
@@ -305,11 +239,11 @@ def test_cli_rejects_unknown_vcs(repo, monkeypatch):
         cli.build_engine(_cli_args(repo))
 
 
-# The engine end to end on the GitHub backend: plan comments and takes the lock (a tag ref), apply
+# The engine end to end on the GitHub backend: plan comments and takes the lock (the service's file), apply
 # passes the gates on live PR state, and a forged plan marker from someone else is ignored.
 
 
-def test_engine_plan_then_apply_on_github(repo, gh):
+def test_engine_plan_then_apply_on_github(repo, gh, tmp_path):
     from fakes import FakeRunner, ev_result, ev_stats, stats
 
     from ferry import config
@@ -336,11 +270,12 @@ def test_engine_plan_then_apply_on_github(repo, gh):
     red = Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths, environ={})
     run = ([ev_result("dns-1", "Write chrony.conf", "changed", role="chrony"),
             ev_stats(**{"dns-1": stats(ok=5, changed=1)})], 0)
-    locks = GitHubTagLocks(client, "acme/ansible")
+    locks = SQLiteLocks(tmp_path / "locks.db")
 
     eng = Engine(cfg, repo, FakeRunner(run), be, locks, red, lambda: 1_800_000_000.0)
     assert eng.plan(1, sha, "pip").ok
-    assert "tags/ferry-lock-homelab" in fake.refs and locks.get("homelab").holder == 1
+    assert locks.get("homelab").holder == 1
+    assert not any("/git/" in path for _, path, _, _ in fake.calls)  # nothing written to the repo
     assert "ferry:plan" in comments[-1]["body"]
 
     # Someone else pastes a copy of the plan marker: apply must not trust it over ferry's own.
