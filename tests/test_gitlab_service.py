@@ -542,3 +542,27 @@ def test_metrics_count_gitlab_rejects_and_jobs(world):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ---- #21: closed MRs get no plan, no credentials, no lock -----------------------------------------
+
+@pytest.mark.parametrize("command", ["/ferry plan", "/ferry apply"])
+def test_commands_on_a_closed_mr_are_refused_at_the_webhook(world, monkeypatch, command):
+    from test_service import count_credentials
+    minted = count_credentials(monkeypatch)
+    world.closed = True
+    status, text = world.deliver("Note Hook", world.note_event(command))
+    assert status == 202 and "closed" in text
+    assert world.svc.jobs.empty() and not minted
+    assert "is closed" in world.notes[-1]["body"]
+    assert world.locks.get("homelab") is None
+
+
+def test_a_plan_queued_before_the_mr_closed_runs_nothing(world, monkeypatch):
+    from test_service import count_credentials
+    minted = count_credentials(monkeypatch)
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[0] == 202
+    world.closed = True
+    [result] = world.drain()
+    assert result["result"] == "skipped" and not minted and not world.runner.requests
+    assert world.locks.get("homelab") is None

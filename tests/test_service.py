@@ -609,3 +609,48 @@ def test_metric_labels_are_escaped_and_bounded():
     assert reject_reason(202, "apply refused: no Developer access") == "no_access"
     assert reject_reason(202, "plan refused: the head isn't the one commented on") == "head_moved"
     assert reject_reason(503, "queue full, try again later") == "queue_full"
+
+
+# ---- #21: closed PRs get no plan, no credentials, no lock -----------------------------------------
+
+def count_credentials(monkeypatch):
+    import contextlib
+    from ferry import service as service_mod
+    minted = []
+
+    @contextlib.contextmanager
+    def creds(bao, ssh_user):
+        minted.append(1)
+        yield {"ANSIBLE_REMOTE_USER": "root"}
+    monkeypatch.setattr(service_mod, "job_credentials", creds)
+    return minted
+
+
+@pytest.mark.parametrize("command", ["/ferry plan", "/ferry apply"])
+def test_commands_on_a_closed_pr_are_refused_at_the_webhook(world, monkeypatch, command):
+    minted = count_credentials(monkeypatch)
+    world.closed = True
+    status, text = world.deliver("issue_comment", world.comment_event(command))
+    assert status == 202 and "closed" in text
+    assert world.svc.jobs.empty() and not minted
+    assert "is closed" in world.comments[-1]["body"]
+    assert world.locks.get("homelab") is None
+
+
+def test_commands_on_a_merged_pr_are_refused_at_the_webhook(world, monkeypatch):
+    minted = count_credentials(monkeypatch)
+    world.gh.routes[("GET", f"{R}/pulls/1")] = lambda q, d: (200, pr_json(number=1, sha=world.sha, state="closed",
+                                                                          merged=True))
+    status, text = world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    assert status == 202 and "merged" in text
+    assert world.svc.jobs.empty() and not minted and "is merged" in world.comments[-1]["body"]
+
+
+def test_a_plan_queued_before_the_pr_closed_runs_nothing(world, monkeypatch):
+    minted = count_credentials(monkeypatch)
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[0] == 202
+    world.closed = True  # closed while the job waited in the queue
+    [result] = world.drain()
+    assert result["result"] == "skipped" and not minted and not world.runner.requests
+    assert world.locks.get("homelab") is None
+    assert "not run" in world.comments[-1]["body"] and "closed" in world.comments[-1]["body"]

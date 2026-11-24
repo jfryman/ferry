@@ -327,3 +327,29 @@ def test_engine_plan_then_apply_on_github(repo, gh, tmp_path):
     fake.routes[("GET", f"{R}/pulls/1/reviews")] = [{"user": {"login": "james"}, "state": "APPROVED", "commit_id": "old"}]
     out = Engine(cfg, repo, FakeRunner(run), be, locks, red, lambda: 1_800_000_000.0).apply(1, sha, "james")
     assert not out.ok and any("approval" in r for r in out.reasons)
+
+
+@pytest.mark.parametrize("status, taken", [(500, False), (502, False), (403, False), (401, False),
+                                           (404, True), (410, True)])
+def test_lock_holder_lookup_errors_through_the_real_client(repo, tmp_path, status, taken):
+    """#21: only a definite 404/410 for the holder PR gives its lock away."""
+    from ferry import config
+    from ferry.engine import Engine
+    from ferry.sanitize import Redactor
+    from fakes import FakeRunner, ev_stats
+
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="ferry-acme[bot]")
+    fake.routes[("GET", f"{R}/pulls/1")] = pr(number=1, sha="a" * 40)
+    fake.routes[("GET", f"{R}/pulls/2")] = lambda q, d: (status, {"message": "x"})
+    fake.routes[("GET", f"{R}/pulls/1/files")] = [{"filename": "inventories/homelab/host_vars/dns-1.yml"}]
+    fake.routes[("POST", f"{R}/issues/1/comments")] = lambda q, d: (201, {"id": 1, "user": {"login": "b"},
+                                                                         "body": d["body"]})
+    cfg = config.load(repo / "ferry.yaml")
+    locks = SQLiteLocks(tmp_path / "locks.db")
+    locks.try_acquire(new_lock("homelab", 2, "b" * 40, "james"))
+    runner = FakeRunner(([ev_stats()], 0))
+    out = Engine(cfg, repo, runner, be, locks, Redactor([], [], [], environ={}), lambda: 1.0).plan(1, "a" * 40, "pip")
+    assert out.ok is taken
+    assert locks.get("homelab").holder == (1 if taken else 2)
+    assert bool(runner.requests) is taken

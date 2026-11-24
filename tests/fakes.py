@@ -6,7 +6,7 @@ import json
 
 from ferry.results import RunResult, parse_events
 from ferry.runner import RunRequest
-from ferry.vcs.base import ChangeRequest, Note
+from ferry.vcs.base import ChangeRequest, Note, NotFound
 
 
 class FakeVCS:
@@ -19,6 +19,7 @@ class FakeVCS:
         self.developers = {"james", "pip"}
         self.commit_mrs: dict[str, list[int]] = {}
         self.rule_blockers: dict[int, list[str]] = {}
+        self.lookup_errors: dict[int, Exception] = {}  # get_change_request(id) raises this
         self._next = 1
 
     def add_cr(self, cr_id, sha="a" * 40, author="pip", files=None, **kw):
@@ -29,6 +30,10 @@ class FakeVCS:
         return self.crs[cr_id]
 
     def get_change_request(self, cr_id):
+        if cr_id in self.lookup_errors:
+            raise self.lookup_errors[cr_id]
+        if cr_id not in self.crs:
+            raise NotFound(f"no change request {cr_id}")
         return self.crs[cr_id]
 
     def merge_rule_blockers(self, cr):

@@ -138,6 +138,8 @@ class GitLabService(Service):
             self.vcs.post_note(iid, f"`/ferry {action}` needs Developer access to this project; @{user} doesn't have it.")
             return 202, f"{action} refused: no Developer access"
         cr = self.vcs.get_change_request(iid)
+        if not self._open_or_say(cr, action):
+            return 202, f"{action} refused: {self.noun} is {cr.state}"
         # The hook carries the MR's head as GitLab saw it; the MR's diff versions say when it arrived.
         payload_head = ((p["merge_request"].get("last_commit") or {}).get("id")) or None
         sha = self._pin_head(cr, action, parse_time(note["created_at"]), named, payload_head)

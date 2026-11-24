@@ -30,6 +30,11 @@ wait_idle() {  # until the worker has nothing queued and the last job changed
   echo "timed out waiting for the job; see: docker logs ferry-lab-ferry"
 }
 
+last_comment() { curl -s localhost:18999/_state | python3 -c 'import json,sys; c=json.load(sys.stdin)["comments"]; print(c[-1]["body"] if c else "")'; }
+expect() {  # expect NAME PATTERN TEXT: one PASS/FAIL line for the security scenarios
+  if printf '%s' "$3" | grep -qE -- "$2"; then echo "PASS $1"; else echo "FAIL $1: wanted /$2/, got: $(printf '%s' "$3" | head -c 300)"; fi
+}
+
 case "${1:-help}" in
   open)     curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null
             pr_event opened "${2:-pip}"; echo; [ "${2:-pip}" = pip ] && wait_idle ;;
@@ -72,6 +77,12 @@ case "${1:-help}" in
               grep -qF -- "$s" "$LAB/leak.txt" && found=$((found + 1))
             done
             echo "service secrets found in what the playbook shipped out: $found of 3" ;;
+  closed-plan) # #21: /ferry plan on a closed PR is refused at the webhook; no job, no certificate
+            curl -s -X POST localhost:18999/_pr_state -d '{"state":"closed"}' >/dev/null
+            out=$(comment james "/ferry plan")
+            expect closed-plan "refused: PR is closed" "$out"
+            expect closed-plan-note "is closed" "$(last_comment)"
+            curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;
