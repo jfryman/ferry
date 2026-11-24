@@ -45,6 +45,10 @@ class LockStore(Protocol):
 
     def release(self, key: str, holder: int) -> bool: ...
 
+    def release_all(self, holder: int) -> list[str]:
+        """Release every lock `holder` has; return their keys. Needs nothing but the store itself."""
+        ...
+
 
 class MemoryLocks:
     def __init__(self):
@@ -66,6 +70,12 @@ class MemoryLocks:
             return False
         del self.locks[key]
         return True
+
+    def release_all(self, holder):
+        keys = sorted(k for k, lock in self.locks.items() if lock.holder == holder)
+        for k in keys:
+            del self.locks[k]
+        return keys
 
 
 class GitLabTagLocks:
@@ -114,6 +124,14 @@ class GitLabTagLocks:
             return False
         self.client.request("DELETE", self._path(key))
         return True
+
+    def release_all(self, holder):
+        released = []
+        for tag in self.client.paged(f"/projects/{self.project}/repository/tags", {"search": f"^{TAG_PREFIX}"}):
+            key = tag.get("name", "")[len(TAG_PREFIX):]
+            if tag.get("name", "").startswith(TAG_PREFIX) and self.release(key, holder):
+                released.append(key)
+        return sorted(released)
 
 
 class SQLiteLocks:
@@ -168,6 +186,22 @@ class SQLiteLocks:
         with closing(self._connect()) as db:
             cur = db.execute("DELETE FROM locks WHERE key = ? AND holder = ?", (key, holder))
             return cur.rowcount == 1
+
+    def release_all(self, holder):
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                keys = sorted(r[0] for r in db.execute("SELECT key FROM locks WHERE holder = ?", (holder,)))
+                db.execute("DELETE FROM locks WHERE holder = ?", (holder,))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return keys
+
+    def count(self) -> int:
+        with closing(self._connect()) as db:
+            return db.execute("SELECT COUNT(*) FROM locks").fetchone()[0]
 
 
 def new_lock(key: str, holder: int, sha: str, user: str) -> Lock:

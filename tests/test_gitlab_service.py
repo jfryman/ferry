@@ -15,7 +15,7 @@ from test_gitlab import API, FakeGitLab
 from test_service import clean_run, git
 
 from ferry.gitlab_service import GitLabService, verify_token
-from ferry.locks import SQLiteLocks
+from ferry.locks import SQLiteLocks, new_lock
 from ferry.service import Job, Settings, make_handler
 from ferry.vcs.gitlab import GitLabBackend, GitLabClient
 from ferry.workspace import Workspace, _git_env
@@ -85,10 +85,11 @@ class World:
 
     def mr_json(self):
         return {"iid": 1, "sha": self.sha, "source_branch": "feature", "target_branch": "main",
-                "author": {"username": self.author}, "state": "opened", "draft": False,
+                "author": {"username": self.author}, "state": "closed" if self.closed else "opened", "draft": False,
                 "detailed_merge_status": self.merge_status, "web_url": "https://gitlab.example.com/acme/ansible/-/merge_requests/1"}
 
     author = "bob"
+    closed = False  # what the API says about MR 1
 
     def _runner(self, checkout, marker, env):
         self.envs.append((checkout, env))
@@ -271,6 +272,7 @@ def test_plan_then_apply_then_close(world):
     assert world.runner.requests[-1].check is False
     assert "ferry apply" in world.notes[-1]["body"]
 
+    world.closed = True
     world.deliver("Merge Request Hook", world.mr_event("merge"))
     [unlock] = world.drain()
     assert unlock["released"] == ["homelab"] and world.locks.get("homelab") is None
@@ -280,6 +282,7 @@ def test_close_releases_locks(world):
     world.deliver("Merge Request Hook", world.mr_event())
     world.drain()
     assert world.locks.get("homelab").holder == 1
+    world.closed = True
     assert world.deliver("Merge Request Hook", world.mr_event("close"))[1] == "unlock queued"
     [unlock] = world.drain()
     assert unlock["released"] == ["homelab"]
@@ -472,3 +475,27 @@ def test_a_refused_apply_mints_no_credentials(world, monkeypatch):
     world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
     result, _ = apply_reasons(world, "x2")
     assert result["ok"] and len(minted) == 2
+
+
+# ---- unlock without git (#14) --------------------------------------------------------------------
+
+
+def test_close_releases_locks_without_reaching_git(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.locks.try_acquire(new_lock("retired", 1, world.sha, "pip"))  # an inventory no longer in ferry.yaml
+    world.svc.workspace.remote = "file:///nonexistent/gone.git"  # git is unreachable
+    world.closed = True
+    world.deliver("Merge Request Hook", world.mr_event("close"))
+    [unlock] = world.drain()
+    assert unlock["ok"] and unlock["released"] == ["homelab", "retired"]
+    assert world.locks.get("homelab") is None
+
+
+def test_a_reopened_mr_keeps_its_locks(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.deliver("Merge Request Hook", world.mr_event("close"))  # but it's open again by the time the job runs
+    [unlock] = world.drain()
+    assert unlock["released"] == [] and "open again" in unlock["skipped"]
+    assert world.locks.get("homelab").holder == 1

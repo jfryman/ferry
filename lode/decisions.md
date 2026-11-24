@@ -204,3 +204,11 @@ worker runs them, they post "not run" and spend nothing. Rejected: comparing com
 `Engine.apply_precheck` runs `_apply_blockers` (apply_checks, the policy check, the scope compared
 with the plan) with a runner that can't run, and posts the refusal. Only inventories that pass get a
 `job_credentials` block, where `apply()` checks everything again.
+
+## Unlock on close from the lock table (#14)
+Unlocking read `ferry.yaml` from the default branch to list inventories, so an unreachable git
+remote failed the job and leaked the lock (it isn't retried), and an inventory removed from
+ferry.yaml kept its lock forever. `LockStore.release_all(holder)` deletes by PR number (SQLite,
+memory and tag locks). The job first asks the API whether the PR is open again (a quick reopen
+keeps its locks); if the API can't answer, the fresh, verified close event is trusted. Losing the
+state file frees every lock, documented in the README.

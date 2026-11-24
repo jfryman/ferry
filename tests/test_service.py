@@ -13,7 +13,7 @@ import pytest
 from fakes import FakeRunner, ev_result, ev_stats, stats
 from test_github import FakeGitHub, R, gql_pr, merge_rules, pr as pr_json
 
-from ferry.locks import SQLiteLocks
+from ferry.locks import SQLiteLocks, new_lock
 from ferry.service import Job, Service, Settings, make_handler, verify_signature
 from ferry.vcs.github import GitHubBackend, GitHubClient
 from ferry.workspace import Workspace
@@ -41,6 +41,8 @@ def clean_run():
 class World:
     """GitHub (fake API + real git remote), the service, and what it did."""
 
+    closed = False  # what the API says about PR 1
+
     def __init__(self, repo, tmp_path, runs=()):
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.tmp = tmp_path
@@ -67,7 +69,8 @@ class World:
         self.reviews = []
         self.writers = {"james", "pip"}
         g = self.gh
-        g.routes[("GET", f"{R}/pulls/1")] = lambda q, d: (200, pr_json(number=1, sha=self.sha))
+        g.routes[("GET", f"{R}/pulls/1")] = lambda q, d: (200, pr_json(number=1, sha=self.sha,
+                                                                   state="closed" if self.closed else "open"))
         g.routes[("GET", f"{R}/pulls/1/files")] = [{"filename": "inventories/homelab/host_vars/ntp-1.yml"},
                                                    {"filename": "ferry.yaml"}]
         g.routes[("GET", f"{R}/issues/1/comments")] = lambda q, d: (200, self.comments)
@@ -236,6 +239,7 @@ def test_plan_then_apply_then_close(world):
     assert world.runner.requests[-1].check is False
     assert "ferry apply" in world.comments[-1]["body"]
 
+    world.closed = True
     world.deliver("pull_request", world.pr_event("closed"))
     [unlock] = world.drain()
     assert unlock["released"] == ["homelab"] and world.locks.get("homelab") is None
@@ -505,3 +509,27 @@ def test_a_refused_apply_mints_no_credentials(world, monkeypatch):
     [applied] = world.drain()
     assert applied["ok"], applied
     assert len(minted) == 2
+
+
+# ---- unlock without git (#14) --------------------------------------------------------------------
+
+
+def test_close_releases_locks_without_reaching_git(world):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.locks.try_acquire(new_lock("retired", 1, world.sha, "pip"))  # an inventory no longer in ferry.yaml
+    world.svc.workspace.remote = "file:///nonexistent/gone.git"  # git is unreachable
+    world.closed = True
+    world.deliver("pull_request", world.pr_event("closed"))
+    [unlock] = world.drain()
+    assert unlock["ok"] and unlock["released"] == ["homelab", "retired"]
+    assert world.locks.get("homelab") is None
+
+
+def test_a_reopened_pr_keeps_its_locks(world):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.deliver("pull_request", world.pr_event("closed"))  # but it's open again by the time the job runs
+    [unlock] = world.drain()
+    assert unlock["released"] == [] and "open again" in unlock["skipped"]
+    assert world.locks.get("homelab").holder == 1
