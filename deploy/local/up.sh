@@ -125,8 +125,12 @@ docker run -d --name ferry-lab-github --network "$NET" -p 18999:8080 -v "$LAB:/l
 docker run -d --name ferry-lab-target --network "$NET" -v "$LAB/ca:/lab/ca:ro" ferry-target:lab >/dev/null
 # The playbooks run here: user ferry-run, none of the service's secrets mounted, the work dir
 # read-only. It refuses to start if it can read any of the paths in FERRY_EXECUTOR_MUST_NOT_READ.
+# The socket lives on a named volume: Docker Desktop (macOS) can't chmod a socket on a host bind mount.
+docker volume rm -f ferry-lab-run >/dev/null 2>&1 || true
+docker volume create ferry-lab-run >/dev/null
+docker run --rm -u 0 -v ferry-lab-run:/r --entrypoint chmod ferry:lab 1777 /r
 docker run -d --name ferry-lab-executor --network "$NET" -u 10002 \
-  -v "$LAB/work:/var/lib/ferry/work:ro" -v "$LAB/run:/run/ferry" \
+  -v "$LAB/work:/var/lib/ferry/work:ro" -v ferry-lab-run:/run/ferry \
   -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock -e ANSIBLE_HOST_KEY_CHECKING=False \
   -e FERRY_EXECUTOR_MUST_NOT_READ=/secrets/app.pem:/secrets/webhook-secret:/jwt/nomad_openbao.jwt:/var/lib/ferry/state/locks.db \
   ferry:lab executor >/dev/null
@@ -134,7 +138,7 @@ docker run -d --name ferry-lab-executor --network "$NET" -u 10002 \
 printf '[safe]\n\tdirectory = *\n' > "$LAB/gitconfig"
 docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 -v "$LAB/gitconfig:/etc/gitconfig:ro" \
   -v "$LAB/secrets:/secrets:ro" -v "$LAB/jwt:/jwt:ro" -v "$LAB/remote:/remote:ro" -v "$LAB/state:/var/lib/ferry/state" \
-  -v "$LAB/work:/var/lib/ferry/work" -v "$LAB/run:/run/ferry" -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
+  -v "$LAB/work:/var/lib/ferry/work" -v ferry-lab-run:/run/ferry -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
   -e FERRY_GITHUB_REPO=acme/ansible -e FERRY_GITHUB_APP_ID=1 -e FERRY_GITHUB_APP_KEY_FILE=/secrets/app.pem \
   -e FERRY_WEBHOOK_SECRET_FILE=/secrets/webhook-secret \
   -e FERRY_COMMIT_STATUS=1 \
