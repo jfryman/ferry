@@ -153,6 +153,9 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
   FERRY_GALAXY_TIMEOUT_SECONDS   300 (default): kill ansible-galaxy (and what it started) after this
   FERRY_COLLECTIONS_MAX_AGE_DAYS 14 (default): prune collection caches unused this long (0: never)
   FERRY_GIT_TIMEOUT_SECONDS      300 (default): any one git fetch/checkout
+  FERRY_COMMIT_STATUS            1: post `ferry/plan: <inv>` / `ferry/apply: <inv>` commit statuses on
+                                 the PR head (GitHub App: "Commit statuses: write"), so merging can
+                                 require an applied change; ferry's own never blocks its apply
   FERRY_ALLOW_COMMANDS           plan,apply (default): comment commands this ferry takes; `plan`
                                  alone makes it plan-only
   FERRY_DISABLE_AUTOPLAN         1: plan only on `/ferry plan`, never on push
@@ -263,7 +266,8 @@ def build_service(vcs: str | None = None):
                   collections_max_age_days=float(_env("FERRY_COLLECTIONS_MAX_AGE_DAYS", "14")),
                   executor_socket=_env("FERRY_EXECUTOR_SOCKET"),
                   allow_commands=_allow_commands(), disable_autoplan=_env("FERRY_DISABLE_AUTOPLAN") in ("1", "true", "yes"),
-                  switch_dir=_switch_dir())
+                  switch_dir=_switch_dir(),
+                  commit_status=_env("FERRY_COMMIT_STATUS") in ("1", "true", "yes"))
     if common["galaxy"] not in ("install", "skip"):
         sys.exit("ferry serve: FERRY_GALAXY must be install or skip")
     workdir = _env("FERRY_WORKDIR", "/var/lib/ferry/work")
@@ -304,7 +308,7 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
     client = GitLabClient(required["FERRY_GITLAB_URL"].rstrip("/") + "/api/v4", token)
     project = required["FERRY_GITLAB_PROJECT"]
     info = client.request("GET", f"/projects/{urllib.parse.quote(project, safe='')}")
-    vcs = GitLabBackend(client, info["id"], pipeline_blocks=True)
+    vcs = GitLabBackend(client, info["id"], pipeline_blocks=True, own_status_prefix="ferry/")
     vcs.bot_username()  # fail at startup, not on the first webhook, if the token is wrong
     settings = Settings(repo=info["path_with_namespace"], project_id=str(info["id"]),
                         default_branch=_env("FERRY_DEFAULT_BRANCH") or info.get("default_branch") or "main",

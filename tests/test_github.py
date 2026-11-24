@@ -404,3 +404,32 @@ def test_contributors_refuse_a_pr_with_more_commits_than_github_lists():
     fake.routes[("GET", f"{R}/pulls/1/commits")] = lambda q, d: (200, page if int(q["page"][0]) <= 3 else [])
     with pytest.raises(ValueError, match="250"):
         be.contributors(ChangeRequest(1, "a" * 40, "f", "main", "alice", "opened"))
+
+
+def test_set_status_posts_a_commit_status():
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="b[bot]")
+    fake.routes[("POST", f"{R}/statuses/{'a' * 40}")] = lambda q, d: (201, d)
+    be.set_status("a" * 40, "ferry/plan: homelab", "running", "planning", "https://x/1")
+    be.set_status("a" * 40, "ferry/apply: homelab", "failure", "x" * 300)
+    (_, _, _, d1), (_, _, _, d2) = [c for c in fake.calls if c[0] == "POST"]
+    assert d1 == {"state": "pending", "context": "ferry/plan: homelab", "description": "planning",
+                  "target_url": "https://x/1"}
+    assert d2["state"] == "failure" and len(d2["description"]) <= 140 and "target_url" not in d2
+
+
+def test_ferrys_own_required_status_does_not_block_its_apply():
+    """#29 x #8: `ferry/apply: homelab` required by a ruleset, pending because ferry hasn't applied."""
+    from ferry.vcs.base import ChangeRequest
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="ferry-acme[bot]")
+    rules = [{"type": "required_status_checks", "ruleset_id": 2,
+              "parameters": {"required_status_checks": [{"context": "ferry/apply: homelab"}, {"context": "ci"}]}}]
+    contexts = [status("ferry/apply: homelab", state="PENDING", creator="ferry-acme[bot]"), status("ci")]
+    merge_rules(fake, gql_pr(sha="a" * 40, contexts=contexts, merge_state="BLOCKED"), rules=rules)
+    cr = ChangeRequest(1, "a" * 40, "f", "main", "pip", "opened")
+    assert be.merge_rule_blockers(cr) == []
+    # Someone else's status with ferry's name is not ferry's.
+    contexts[0] = status("ferry/apply: homelab", state="PENDING", creator="mallory")
+    merge_rules(fake, gql_pr(sha="a" * 40, contexts=contexts, merge_state="BLOCKED"), rules=rules)
+    assert be.merge_rule_blockers(cr) != []

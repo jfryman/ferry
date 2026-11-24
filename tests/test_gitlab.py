@@ -308,3 +308,57 @@ def test_contributors_are_pushers_to_the_source_branch(gl):
     fake.routes[("GET", f"{p}/events")] = lambda u, d: (403, {"message": "403 Forbidden"})
     with pytest.raises(GitLabError):
         be.contributors(cr)
+
+
+def test_set_status_posts_an_external_commit_status(gl):
+    fake, client, be = gl
+    p = "/projects/infra%2Fansible/statuses/" + "a" * 40
+    posted = []
+    fake.routes[("POST", p)] = lambda u, d: (posted.append(d) or 201, d)
+    be.set_status("a" * 40, "ferry/plan: homelab", "running", "planning")
+    be.set_status("a" * 40, "ferry/apply: homelab", "failure", "apply had failures", "https://x")
+    assert posted[0] == {"state": "running", "name": "ferry/plan: homelab", "description": "planning"}
+    assert posted[1]["state"] == "failed" and posted[1]["target_url"] == "https://x"
+    # GitLab refuses a transition to the state it's already in: that's not an error.
+    fake.routes[("POST", p)] = lambda u, d: (400, {"message": "Cannot transition status via :run from :running"})
+    be.set_status("a" * 40, "ferry/plan: homelab", "running", "planning")
+    fake.routes[("POST", p)] = lambda u, d: (403, {"message": "403 Forbidden"})
+    from ferry.vcs.gitlab import GitLabError
+    with pytest.raises(GitLabError):
+        be.set_status("a" * 40, "ferry/plan: homelab", "running", "planning")
+
+
+OWN = {"author": {"username": "ferry-bot"}}
+
+
+@pytest.mark.parametrize("statuses, blocked", [
+    ([{"name": "ferry/apply: homelab", "status": "pending", **OWN}, {"name": "test", "status": "success"}], []),
+    ([{"name": "ferry/apply: homelab", "status": "failed", **OWN}], []),
+    ([{"name": "ferry/apply: homelab", "status": "pending", **OWN}, {"name": "test", "status": "running"}],
+     ["ci_still_running"]),
+    ([{"name": "test", "status": "failed"}], ["ci_still_running"]),
+    # Someone else's status named like ferry's isn't ferry's.
+    ([{"name": "ferry/apply: homelab", "status": "pending", "author": {"username": "mallory"}}], ["ci_still_running"]),
+])
+def test_ferrys_own_statuses_dont_block_its_apply_on_gitlab(gl, statuses, blocked):
+    """#29: with "pipelines must succeed", ferry's pending `ferry/apply` would hold the MR in
+    ci_still_running and deadlock its own apply; only other statuses count."""
+    fake, client, _ = gl
+    be = GitLabBackend(client, "infra/ansible", pipeline_blocks=True, own_status_prefix="ferry/")
+    fake.routes[("GET", "/user")] = {"username": "ferry-bot"}
+    fake.routes[("GET", MR7)] = {"iid": 7, "sha": "a" * 40, "source_branch": "f", "target_branch": "main",
+                                 "author": {"username": "bob"}, "state": "opened",
+                                 "detailed_merge_status": "ci_still_running"}
+    fake.routes[("GET", f"/projects/infra%2Fansible/repository/commits/{'a' * 40}/statuses")] = statuses
+    assert be.get_change_request(7).blocked_reasons == blocked
+
+
+def test_unreadable_statuses_keep_the_pipeline_blocker(gl):
+    fake, client, _ = gl
+    be = GitLabBackend(client, "infra/ansible", pipeline_blocks=True, own_status_prefix="ferry/")
+    fake.routes[("GET", MR7)] = {"iid": 7, "sha": "a" * 40, "source_branch": "f", "target_branch": "main",
+                                 "author": {"username": "bob"}, "state": "opened",
+                                 "detailed_merge_status": "ci_must_pass"}
+    fake.routes[("GET", f"/projects/infra%2Fansible/repository/commits/{'a' * 40}/statuses")] = \
+        lambda u, d: (500, {"message": "x"})
+    assert be.get_change_request(7).blocked_reasons == ["ci_must_pass"]

@@ -803,3 +803,25 @@ def test_gitlab_freeze_and_autoplan_switches(world, tmp_path, monkeypatch):
     assert "disabled" in text and world.svc.jobs.empty() and not minted
     assert "applies are disabled" in world.notes[-1]["body"]
     assert world.deliver("Note Hook", world.note_event("/ferry plan"))[1] == "plan queued"
+
+
+# ---- #29 on GitLab ----------------------------------------------------------------------------------
+
+def test_gitlab_statuses_and_no_self_deadlock(world):
+    posted = []
+    world.gl.routes[("POST", f"{P}/statuses/{world.sha}")] = lambda u, d: (posted.append(d) or 201, d)
+    world.svc.settings.commit_status = True
+    world.svc.vcs.own_status_prefix = "ferry/"
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert [p["state"] for p in posted if p["name"] == "ferry/plan: homelab"] == ["running", "success"]
+    assert [p["state"] for p in posted if p["name"] == "ferry/apply: homelab"] == ["pending"]
+    # "Pipelines must succeed": ferry's own pending status is all that's not green.
+    world.merge_status = "ci_still_running"
+    world.gl.routes[("GET", f"{P}/repository/commits/{world.sha}/statuses")] = [
+        {"name": "ferry/apply: homelab", "status": "pending", "author": {"username": BOT}},
+        {"name": "lint", "status": "success"}]
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    result, reasons = apply_reasons(world, "st-1")
+    assert result["ok"], reasons
+    assert [p["state"] for p in posted if p["name"] == "ferry/apply: homelab"][-1] == "success"

@@ -193,6 +193,9 @@ class Settings:
     # Switches (#28), set by the operator, never by a repo: which comment commands this ferry takes
     # (FERRY_ALLOW_COMMANDS), automatic plans off (FERRY_DISABLE_AUTOPLAN), and a directory whose
     # `disable-apply` / `disable-autoplan` files switch those off while the service runs.
+    # Post `ferry/plan: <inv>` and `ferry/apply: <inv>` commit statuses (#29); needs "Commit
+    # statuses: write" on the GitHub App (Developer on GitLab). Off by default.
+    commit_status: bool = False
     allow_commands: tuple = ("plan", "apply")
     disable_autoplan: bool = False
     switch_dir: str | None = None
@@ -220,6 +223,8 @@ class Service:
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self.last_job: dict = {}
         self._job_red: Redactor | None = None  # the running job's redactor, for its error report
+        self._status_off = False  # the code host refused a status for lack of permission: stop trying
+        self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
 
     def marker_key(self) -> bytes:
         """Signs ferry's plan/apply markers: derived from the webhook secret, which only the service
@@ -291,6 +296,46 @@ class Service:
             from .render import inline
             return f"{ {'apply': 'applies', 'plan': 'plans'}[action]} are disabled on this ferry: {inline(why)}"
         return None
+
+    # ---- commit statuses (#29) ----------------------------------------------------------------
+
+    def _status(self, sha: str, kind: str, inv: str, state: str, description: str) -> None:
+        """Best effort: a status that can't be posted never fails the job."""
+        if not self.settings.commit_status or self._status_off or not sha:
+            return
+        key = (sha, kind, inv)
+        if state == "running":
+            self._running[key] = kind
+        else:
+            self._running.pop(key, None)
+        try:
+            self.vcs.set_status(sha, f"ferry/{kind}: {inv}", state, description)
+        except Exception as e:
+            code = getattr(e, "status", None)
+            if code in (401, 403, 404):
+                self._status_off = True
+                log.warning("can't post commit statuses (HTTP %s): the GitHub App needs \"Commit statuses: "
+                            "write\" (Developer on GitLab); not trying again until restart", code)
+            else:
+                log.warning("couldn't post commit status ferry/%s: %s (%s)", kind, inv, type(e).__name__)
+
+    def _plan_status(self, sha: str, inv: str, out) -> None:
+        if out.ok and out.extra.get("noop"):
+            self._status(sha, "plan", inv, "success", "no host is affected")
+            self._status(sha, "apply", inv, "success", "nothing to apply")
+        elif out.ok:
+            self._status(sha, "plan", inv, "success", "plan is clean")
+            self._status(sha, "apply", inv, "pending", "planned; not applied yet")
+        else:
+            self._status(sha, "plan", inv, "failure", "plan is not clean" if out.run is not None else "plan refused")
+
+    def _apply_status(self, sha: str, inv: str, out, user: str) -> None:
+        if out.ok:
+            self._status(sha, "apply", inv, "success", f"applied by {user}"[:140])
+        elif out.run is not None:
+            self._status(sha, "apply", inv, "failure", "apply had failures")
+        else:
+            self._status(sha, "apply", inv, "pending", "planned; not applied yet")
 
     def render_metrics(self) -> str:
         try:
@@ -502,6 +547,7 @@ class Service:
         started = self.clock()
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
+        self._running = {}
         try:
             off = self._disabled(job.action) if job.action in COMMANDS else None
             if job.action == "plan" and not job.pinned and not self.switches()["autoplan"]:
@@ -536,6 +582,8 @@ class Service:
         except Exception as e:  # report on the PR, keep the service up
             result["error"] = f"{type(e).__name__}: {e}"
             log.exception("job %s for #%s failed", job.action, job.pr)
+            for (sha, kind, inv) in list(self._running):
+                self._status(sha, kind, inv, "error", f"ferry couldn't finish the {kind}")
             if job.pr and job.action in ("plan", "apply"):
                 self._report_error(job, result["error"])
         finished = self.clock()
@@ -646,11 +694,19 @@ class Service:
                         break  # in order: what comes after a refused inventory doesn't run (#27)
             todo = invs[: invs.index(culprit)] if culprit else list(invs)
             if todo:
+                if job.action == "plan":
+                    for inv in todo:
+                        self._status(job.sha, "plan", inv, "running", "planning")
                 with job_credentials(self.bao, self.settings.ssh_user) as creds:
                     eng = self._engine(cfg, checkout, {**env, **creds})
                     for inv in todo:
-                        out = eng.plan(job.pr, job.sha, job.user, inv) if job.action == "plan" else \
-                            eng.apply(job.pr, job.sha, job.user, inv)
+                        if job.action == "plan":
+                            out = eng.plan(job.pr, job.sha, job.user, inv)
+                            self._plan_status(job.sha, inv, out)
+                        else:
+                            self._status(job.sha, "apply", inv, "running", "applying")
+                            out = eng.apply(job.pr, job.sha, job.user, inv)
+                            self._apply_status(job.sha, inv, out, job.user)
                         outcomes[inv] = {"ok": out.ok, "reasons": out.reasons}
                         if job.action == "apply" and not out.ok:
                             culprit, why = inv, "didn't apply cleanly" if out.run is not None else "was refused"

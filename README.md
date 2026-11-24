@@ -259,6 +259,27 @@ fresh key is refused as `duplicate comment` (GitHub comments likewise, on the co
   (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;
   the CI driver ignores those two because its apply job is part of that pipeline.
 
+## Commit statuses: merge only what was applied (`ferry serve`)
+
+With `FERRY_COMMIT_STATUS=1`, ferry posts commit statuses on the PR head, one pair per inventory:
+
+| Status | pending | success | failure |
+|---|---|---|---|
+| `ferry/plan: <inventory>` | planning | plan is clean, or no host affected | not clean, or refused |
+| `ferry/apply: <inventory>` | planned, not applied yet; applying | applied, or nothing to apply | apply had failures |
+
+A new push has no statuses until ferry plans it, so a required `ferry/apply: <inventory>` blocks
+the merge until that exact head is applied. GitHub: add it to the branch's required status checks
+(ruleset or branch protection) and give the App **Commit statuses: write**. GitLab: with "Pipelines
+must succeed", the pending `ferry/apply` status holds the merge until the apply succeeds (needs
+Developer, which ferry's token already has).
+
+ferry's own statuses never block ferry's own apply: on GitHub, checks and statuses posted by ferry's
+App are ignored by the merge-rule gate (as `FERRY_GITHUB_OWN_CHECKS`); on GitLab, a "pipeline must
+succeed" blocker is ignored when every status that isn't green is a `ferry/` status posted by
+ferry's own account. A status with ferry's name from anyone else counts like any other. Without the
+permission ferry logs once and carries on without statuses.
+
 ## Switching applies off (`ferry serve`)
 
 For an incident, a change freeze or a suspected compromise of a writer's account, without stopping

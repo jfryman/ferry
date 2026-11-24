@@ -1234,3 +1234,103 @@ def test_serve_reads_the_switch_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("FERRY_ALLOW_COMMANDS", "plan,nuke")
     with pytest.raises(SystemExit):
         cli._allow_commands()
+
+
+# ---- #29: commit statuses ---------------------------------------------------------------------------
+
+def record_statuses(world, status=201):
+    posted = []
+
+    def handler(q, d, sha=None):
+        posted.append(d)
+        return status, d
+    world.gh.routes[("POST", f"{R}/statuses/{world.sha}")] = handler
+    world.svc.settings.commit_status = True
+    return posted
+
+
+def states(posted, name):
+    return [(p["state"], p["description"]) for p in posted if p["context"] == name]
+
+
+def test_plan_and_apply_move_their_statuses(world):
+    posted = record_statuses(world)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert [s for s, _ in states(posted, "ferry/plan: homelab")] == ["pending", "success"]
+    assert states(posted, "ferry/apply: homelab") == [("pending", "planned; not applied yet")]
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    world.drain()
+    assert [s for s, _ in states(posted, "ferry/apply: homelab")] == ["pending", "pending", "success"]
+
+
+def test_a_failed_plan_and_a_failed_apply_fail_their_statuses(world):
+    posted = record_statuses(world)
+    world.runner.queue = [failed_run()]
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert states(posted, "ferry/plan: homelab")[-1][0] == "failure"
+    assert not states(posted, "ferry/apply: homelab")  # nothing to apply from a failed plan
+    world.runner.queue = [clean_run(), failed_run()]
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    world.drain()
+    assert states(posted, "ferry/apply: homelab")[-1][0] == "failure"
+
+
+def test_a_refused_apply_leaves_the_apply_status_pending(world):
+    posted = record_statuses(world)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))  # no approval: refused
+    world.drain()
+    assert [s for s, _ in states(posted, "ferry/apply: homelab")] == ["pending"]
+
+
+def test_a_noop_plan_marks_apply_done(world):
+    posted = record_statuses(world)
+    world.gh.routes[("GET", f"{R}/pulls/1/files")] = [{"filename": "README.md"}]
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert states(posted, "ferry/apply: homelab") == [("success", "nothing to apply")]
+
+
+def test_statuses_go_on_the_head_that_ran(world, repo):
+    posted = record_statuses(world)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    old = world.sha
+    add_requirements(world, repo)  # a new push: a new head
+    new_posted = record_statuses(world)
+    assert world.sha != old and new_posted == []  # nothing on the new head until ferry plans it
+
+
+def test_without_the_permission_statuses_are_skipped_and_the_job_works(world, caplog):
+    posted = record_statuses(world, status=403)
+    world.deliver("pull_request", world.pr_event())
+    [plan] = world.drain()
+    assert plan["ok"] and len(posted) == 1  # tried once, then stopped trying
+    assert sum("commit status" in r.message for r in caplog.records) == 1
+
+
+def test_statuses_are_off_by_default(world):
+    posted = record_statuses(world)
+    world.svc.settings.commit_status = False
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert posted == []
+
+
+def test_an_error_mid_job_fails_the_running_status(world):
+    posted = record_statuses(world)
+
+    class Boom:
+        def run(self, req):
+            raise RuntimeError("ansible died")
+    world.svc.runner_factory = lambda checkout, marker, env: Boom()
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert states(posted, "ferry/plan: homelab")[-1] == ("error", "ferry couldn't finish the plan")

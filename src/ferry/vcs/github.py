@@ -268,6 +268,14 @@ class GitHubBackend:
                     out.add(login)
         return out
 
+    def set_status(self, sha: str, name: str, state: str, description: str, url: str | None = None) -> None:
+        """A commit status (needs the App's "Commit statuses: write"). GitHub has no "running"."""
+        data = {"state": {"running": "pending"}.get(state, state), "context": name,
+                "description": description[:140]}
+        if url:
+            data["target_url"] = url
+        self.client.request("POST", f"{self._r}/statuses/{sha}", data=data)
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for f in self.client.paged(f"{self._r}/pulls/{cr_id}/files"):
