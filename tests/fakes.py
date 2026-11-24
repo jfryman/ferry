@@ -23,7 +23,8 @@ class FakeVCS:
         self._next = 1
 
     def add_cr(self, cr_id, sha="a" * 40, author="pip", files=None, **kw):
-        self.crs[cr_id] = ChangeRequest(cr_id, sha, f"b{cr_id}", "main", author, kw.pop("state", "opened"), **kw)
+        self.crs[cr_id] = ChangeRequest(cr_id, sha, f"b{cr_id}", kw.pop("target", "main"), author,
+                                        kw.pop("state", "opened"), **kw)
         self.files[cr_id] = files or []
         self.approvals.setdefault(cr_id, [])
         self.notes.setdefault(cr_id, [])

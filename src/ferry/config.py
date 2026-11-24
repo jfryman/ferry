@@ -121,6 +121,10 @@ class Config:
     drift: DriftConfig = field(default_factory=DriftConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     max_comment_chars: int = 60000
+    # Base branches ferry handles besides the default branch. A PR into any other branch is never
+    # planned or applied: that branch's merge rules (usually none) would be the only review gate.
+    # The service reads this from the default branch's ferry.yaml, so a PR can't add its own base.
+    base_branches: list[str] = field(default_factory=list)
 
     def inventory(self, name: str | None) -> InventoryConfig:
         if name is None:
@@ -163,4 +167,6 @@ def load(path: str | Path) -> Config:
             raise ValueError(f"ferry.yaml: unknown key {key!r}")
     if not cfg.inventories:
         raise ValueError("ferry.yaml: at least one inventory is required")
+    if not isinstance(cfg.base_branches, list) or not all(isinstance(b, str) and b for b in cfg.base_branches):
+        raise ValueError("ferry.yaml: base_branches must be a list of branch names")
     return cfg

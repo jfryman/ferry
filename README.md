@@ -43,6 +43,10 @@ All re-checked inside the apply job, against live GitLab state:
   from anyone else are ignored) is for that commit, is clean (no failed/unreachable/blocked host),
   is younger than `apply.max_plan_age_hours`, and was made with the same `ferry.yaml`.
 - Re-computed scope equals the planned scope.
+- The MR targets the default branch, or a branch listed in `base_branches` in the default branch's
+  `ferry.yaml` (checked again at apply, so retargeting after the plan is refused). MRs into any
+  other branch are never planned or applied: that branch's merge rules, usually none, would be the
+  only review gate.
 - MR open, not draft, no conflicts, blocking discussions resolved, not otherwise unmergeable
   (`ci_still_running` is fine: the apply job runs in that pipeline).
 - `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`). Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
@@ -58,7 +62,9 @@ semantics), so two MRs can't interleave plans and applies on the same hosts. A s
 its own file (`SQLiteLocks`, `FERRY_LOCK_DB`; Atlantis uses a BoltDB file the same way). CI-only
 GitLab driver, which has no storage of its own: an
 annotated tag `ferry-lock-<inventory>` (creation is atomic server-side; the message holds the holder).
-A lock whose MR is no longer open is stale and taken over automatically. Exclude
+A lock whose MR is closed, merged or deleted (a definite 404/410) is stale and taken over
+automatically. Any other error while checking the holder (timeout, 5xx, rate limit) refuses and
+keeps the lock: it fails closed. Closed and merged MRs are never planned. Exclude
 `ferry-lock-*` tags from pipelines in the consumer's `workflow:rules`. Use a CI `resource_group`
 on apply jobs as a second guard.
 

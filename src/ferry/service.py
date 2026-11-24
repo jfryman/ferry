@@ -131,6 +131,10 @@ class NotOpen(Exception):
     """The PR was closed or merged before the job ran."""
 
 
+class NotHandled(Exception):
+    """The PR targets a base branch ferry doesn't handle."""
+
+
 @dataclass
 class Job:
     action: str  # plan | apply | unlock | drift
@@ -267,7 +271,8 @@ class Service:
             return 202, f"ignored pull_request.{action}"
         if pr.get("draft"):
             return 202, "draft: not planned"
-        if pr["head"]["repo"]["full_name"].lower() != self.settings.repo.lower():
+        # A deleted fork has head.repo null: a fork all the same.
+        if str((pr["head"].get("repo") or {}).get("full_name") or "").lower() != self.settings.repo.lower():
             return 202, "fork PRs are not planned"
         if not self.vcs.can_apply(author):
             self._say_waiting(number, sha, author)
@@ -383,6 +388,11 @@ class Service:
             result.update(error=str(e), skipped=True)
             if job.pinned:
                 self._report_not_run(job, f"{e}. Nothing ran against the hosts.")
+        except NotHandled as e:
+            result.update(error=str(e), skipped=True)
+            log.info("job %s for #%s not run: %s", job.action, job.pr, e)
+            if job.pinned:
+                self._report_not_run(job, f"{e}. Nothing ran against the hosts.")
         except Exception as e:  # report on the PR, keep the service up
             result["error"] = f"{type(e).__name__}: {e}"
             log.exception("job %s for #%s failed", job.action, job.pr)
@@ -430,7 +440,8 @@ class Service:
     def _engine(self, cfg, checkout: Path, env: dict) -> Engine:
         red = self._redactor(cfg, env)
         return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
-                      clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved")
+                      clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved",
+                      default_branch=self.settings.default_branch)
 
     def _report_moved(self, job: Job, why: str) -> None:
         self._report_not_run(job, f"{why}. Nothing ran against the hosts. Read the new commits, then "
@@ -453,6 +464,11 @@ class Service:
                                 f"after the `/ferry {job.action}` comment")
         main_dir, _ = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")  # from the default branch, never the PR
+        # Only PRs into the default branch or ferry.yaml's base_branches (#22): checked before the PR
+        # is checked out or any credential exists. The engine checks again against live state.
+        why = Engine(cfg, main_dir, _NoRunner(), default_branch=self.settings.default_branch).base_reason(cr)
+        if why:
+            raise NotHandled(why.replace("MR", self.noun))
         checkout = self.workspace.pull_request(job.pr, job.sha)
         try:
             env = self.workspace.collections(checkout)
@@ -462,7 +478,7 @@ class Service:
                 # Every apply gate first, without credentials: a refused apply (no approval, a stale
                 # plan) costs no OpenBao login and no certificate. apply() checks again with them.
                 pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
-                             clock=self.clock)
+                             clock=self.clock, default_branch=self.settings.default_branch)
                 for inv in invs:
                     out = pre.apply_precheck(job.pr, job.sha, job.user, inv)
                     if out is not None:

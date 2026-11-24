@@ -34,8 +34,9 @@ class FakeGitHub:
         return status, json.dumps(obj).encode()
 
 
-def pr(number=7, sha="abc", state="open", merged=False, draft=False, mergeable=True, mergeable_state="clean"):
-    return {"number": number, "head": {"sha": sha, "ref": "feature"}, "base": {"ref": "main"},
+def pr(number=7, sha="abc", state="open", merged=False, draft=False, mergeable=True, mergeable_state="clean",
+       base="main"):
+    return {"number": number, "head": {"sha": sha, "ref": "feature"}, "base": {"ref": base},
             "user": {"login": "pip"}, "state": state, "merged": merged, "merged_at": "x" if merged else None,
             "draft": draft, "mergeable": mergeable, "mergeable_state": mergeable_state,
             "html_url": f"https://github.com/acme/ansible/pull/{number}"}

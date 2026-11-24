@@ -42,6 +42,7 @@ class World:
     """GitHub (fake API + real git remote), the service, and what it did."""
 
     closed = False  # what the API says about PR 1
+    base = "main"  # PR 1's base branch, as the API says
 
     def __init__(self, repo, tmp_path, runs=()):
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -69,7 +70,7 @@ class World:
         self.reviews = []
         self.writers = {"james", "pip"}
         g = self.gh
-        g.routes[("GET", f"{R}/pulls/1")] = lambda q, d: (200, pr_json(number=1, sha=self.sha,
+        g.routes[("GET", f"{R}/pulls/1")] = lambda q, d: (200, pr_json(number=1, sha=self.sha, base=self.base,
                                                                    state="closed" if self.closed else "open"))
         g.routes[("GET", f"{R}/pulls/1/files")] = [{"filename": "inventories/homelab/host_vars/ntp-1.yml"},
                                                    {"filename": "ferry.yaml"}]
@@ -116,11 +117,14 @@ class World:
         delivery = delivery or f"delivery-{self._n}"
         return self.svc.handle(event, delivery, sign(body), body)
 
-    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None, at=OPENED_ISO):
+    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None, at=OPENED_ISO,
+                 base=None, head_repo=...):
+        repo = {"full_name": "evil/ansible" if fork else "acme/ansible"} if head_repo is ... else head_repo
         return {"action": action, "repository": {"full_name": "acme/ansible"},
                 "sender": {"login": sender or author},
                 "pull_request": {"number": 1, "draft": draft, "user": {"login": author}, "updated_at": at,
-                                 "head": {"sha": self.sha, "repo": {"full_name": "evil/ansible" if fork else "acme/ansible"}}}}
+                                 "base": {"ref": base or self.base},
+                                 "head": {"sha": self.sha, "repo": repo}}}
 
     def comment_event(self, body, user="james", at=NOW_ISO, updated=None):
         return {"action": "created", "repository": {"full_name": "acme/ansible"},
@@ -654,3 +658,71 @@ def test_a_plan_queued_before_the_pr_closed_runs_nothing(world, monkeypatch):
     assert result["result"] == "skipped" and not minted and not world.runner.requests
     assert world.locks.get("homelab") is None
     assert "not run" in world.comments[-1]["body"] and "closed" in world.comments[-1]["body"]
+
+
+# ---- #22: base branch -------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("action", ["opened", "synchronize", "reopened", "ready_for_review"])
+def test_a_pr_into_another_branch_is_not_planned(world, monkeypatch, action):
+    minted = count_credentials(monkeypatch)
+    world.base = "feature-x"
+    world.deliver("pull_request", world.pr_event(action))
+    world.drain()
+    assert not minted and not world.runner.requests and world.locks.get("homelab") is None
+    assert not any("ferry:plan" in c["body"] for c in world.comments)
+
+
+@pytest.mark.parametrize("command", ["/ferry plan", "/ferry apply"])
+def test_commands_on_a_pr_into_another_branch_are_refused(world, monkeypatch, command):
+    minted = count_credentials(monkeypatch)
+    world.base = "feature-x"
+    world.deliver("issue_comment", world.comment_event(command))
+    world.drain()
+    assert not minted and not world.runner.requests
+    assert "`feature-x`" in world.comments[-1]["body"] and "`main`" in world.comments[-1]["body"]
+
+
+def test_a_pr_retargeted_after_its_plan_is_not_applied(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert world.locks.get("homelab").holder == 1
+    minted = count_credentials(monkeypatch)
+    world.base = "feature-x"  # retargeted after review
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [result] = world.drain()
+    assert not result["ok"] and not minted and len(world.runner.requests) == 1  # only the plan ran
+
+
+def test_an_extra_base_from_the_default_branch_ferry_yaml_is_planned(repo, tmp_path):
+    # ferry.yaml on main allows `release`; the PR targets it.
+    text = (repo / "ferry.yaml").read_text()
+    (repo / "ferry.yaml").write_text("base_branches: [release]\n" + text)
+    w = World(repo, tmp_path / "w", runs=(clean_run(),))
+    w.base = "release"
+    w.deliver("pull_request", w.pr_event())
+    [result] = w.drain()
+    assert result["ok"] and w.runner.requests
+
+
+def test_a_pr_cannot_allow_its_own_base(repo, tmp_path):
+    """The PR's ferry.yaml adding its base doesn't count: only the default branch's does."""
+    w = World(repo, tmp_path / "w", runs=(clean_run(),))
+    git(repo, "checkout", "-q", "feature")
+    (repo / "ferry.yaml").write_text("base_branches: [feature-x]\n" + (repo / "ferry.yaml").read_text())
+    git(repo, "commit", "-qam", "allow my base")
+    sha = git(repo, "rev-parse", "HEAD")
+    bare = w.tmp / "remote.git"
+    git(repo, "push", "-q", str(bare), "feature")
+    git(bare, "update-ref", "refs/pull/1/head", sha)
+    w.sha = sha
+    w.svc.state.saw_head(1, sha, NOW - 60)
+    w.base = "feature-x"
+    w.deliver("pull_request", w.pr_event())
+    [result] = w.drain()
+    assert not w.runner.requests and "targets `feature-x`" in result["error"]
+
+
+def test_a_pr_whose_head_repo_was_deleted_is_not_planned(world):
+    status, text = world.deliver("pull_request", world.pr_event(head_repo=None))
+    assert status == 202 and "fork" in text and world.svc.jobs.empty()

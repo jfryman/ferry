@@ -43,6 +43,7 @@ class Engine:
         clock=time.time,
         job_url: str = "",
         apply_how: str | None = None,
+        default_branch: str | None = None,
     ):
         self.cfg = cfg
         self.repo = Path(repo_dir)
@@ -56,6 +57,9 @@ class Engine:
         self.job_url = job_url
         # How a person triggers an apply, for the plan comment (a CI job on GitLab, a comment on GitHub).
         self.apply_how = apply_how
+        # The repo's default branch: PRs are handled only into it or cfg.base_branches. None (a CI
+        # driver that doesn't know it) skips the check.
+        self.default_branch = default_branch
 
     # ---- helpers -------------------------------------------------------------------------------
 
@@ -76,6 +80,17 @@ class Engine:
         body = render.refusal_comment(action, inventory, sha, reasons, self.red)
         self._post(cr_id, body)
         return Outcome(False, action, reasons, note_body=body)
+
+    def base_reason(self, cr) -> str | None:
+        """Why ferry doesn't handle a PR into this base branch, or None if it does."""
+        if self.default_branch is None:
+            return None
+        allowed = [self.default_branch] + [b for b in self.cfg.base_branches if b != self.default_branch]
+        if cr.target_branch in allowed:
+            return None
+        names = ", ".join(f"`{b}`" for b in allowed)
+        return (f"this MR targets `{cr.target_branch}`; ferry only handles MRs into {names} "
+                "(the default branch, plus `base_branches` in the default branch's ferry.yaml)")
 
     def _lock_conflict(self, inventory: str, cr_id: int, sha: str, user: str) -> str | None:
         """Take (or confirm) the inventory lock for cr_id. Returns a reason string on conflict."""
@@ -131,6 +146,9 @@ class Engine:
         cr = self.vcs.get_change_request(cr_id)
         if not cr.open:
             return self._refuse("plan", cr_id, inv.name, sha, [f"MR is {cr.state}: ferry only plans open MRs"])
+        base = self.base_reason(cr)
+        if base:
+            return self._refuse("plan", cr_id, inv.name, sha, [base])
         violations = self.policy_check()
         if violations:
             return self._refuse("plan", cr_id, inv.name, sha, ["policy check failed:"] + violations)
@@ -171,6 +189,9 @@ class Engine:
             reasons.append(f"MR is {cr.state}")
         if cr.head_sha != sha:
             reasons.append(f"this run is for `{sha[:8]}` but the MR head is `{cr.head_sha[:8]}`; re-run for the newest commit")
+        base = self.base_reason(cr)  # live state: a PR retargeted after its plan is caught here
+        if base:
+            reasons.append(base)
         if cr.draft:
             reasons.append("MR is a draft")
         if cr.has_conflicts:
