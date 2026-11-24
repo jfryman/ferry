@@ -150,7 +150,9 @@ sequenceDiagram
   workload identity, a throwaway ed25519 key signed by OpenBao's SSH CA, and the ansible-vault
   password; all removed and the token revoked when the job ends.
 - **Locks** in the service's SQLite file (`FERRY_LOCK_DB`) on persistent storage; one instance.
-  The same file remembers seen deliveries. Losing it frees every lock.
+  The same file remembers seen deliveries. Closing or merging a PR releases its locks straight
+  from that table (no git fetch, no ferry.yaml), unless the PR was reopened by then. **Losing the
+  file frees every lock**: back it up with the volume, or expect a second PR to plan meanwhile.
 - **Replays:** a delivery is a duplicate if its id *or* its exact signed body was seen before
   (the delivery id isn't covered by the signature), remembered in the state file for 7 days, across
   restarts. Events whose own timestamps (a comment's `created_at`/`updated_at`, a PR's

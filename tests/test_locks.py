@@ -1,6 +1,8 @@
 import multiprocessing as mp
 
-from ferry.locks import Lock, SQLiteLocks, new_lock
+import pytest
+
+from ferry.locks import Lock, MemoryLocks, SQLiteLocks, new_lock
 
 
 def test_acquire_get_release(tmp_path):
@@ -47,3 +49,13 @@ def test_exactly_one_process_wins_a_race(tmp_path):
     winners = [h for h, won in outcomes if won]
     assert len(winners) == 1
     assert SQLiteLocks(path).get("prod").holder == winners[0]
+
+
+@pytest.mark.parametrize("kind", ["sqlite", "memory"])
+def test_release_all_frees_only_the_holders_locks(tmp_path, kind):
+    store = SQLiteLocks(tmp_path / "locks.db") if kind == "sqlite" else MemoryLocks()
+    for inv, holder in (("prod", 7), ("staging", 7), ("lab", 8)):
+        store.try_acquire(new_lock(inv, holder, "abc", "pip"))
+    assert store.release_all(7) == ["prod", "staging"]
+    assert store.release_all(7) == []
+    assert store.get("lab").holder == 8

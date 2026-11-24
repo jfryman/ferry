@@ -314,10 +314,7 @@ class Service:
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         try:
             if job.action == "unlock":
-                main_dir, _ = self.workspace.main(self.settings.default_branch)
-                cfg = config_mod.load(main_dir / "ferry.yaml")
-                released = [inv.name for inv in cfg.inventories if self.locks.release(inv.name, job.pr)]
-                result.update(ok=True, released=released)
+                result.update(self._unlock(job))
             elif job.action == "drift":
                 result.update(self._drift())
             else:
@@ -339,6 +336,17 @@ class Service:
         self.last_job = result
         log.info("job done: %s", result)
         return result
+
+    def _unlock(self, job: Job) -> dict:
+        """Release the PR's locks straight from the lock table: no git, no ferry.yaml, so an
+        unreachable code host can't leak a lock (#14). A PR that was reopened in the meantime keeps
+        its locks; if its state can't be read, the (fresh, verified) close event is trusted."""
+        try:
+            if self.vcs.get_change_request(job.pr).open:
+                return {"ok": True, "released": [], "skipped": f"{self.noun} is open again"}
+        except Exception as e:
+            log.warning("#%s: couldn't read its state (%s); releasing its locks anyway", job.pr, e)
+        return {"ok": True, "released": self.locks.release_all(job.pr)}
 
     def _redactor(self, cfg, env: dict) -> Redactor:
         # The job's own credentials (OpenBao token, ...) live only in the per-job env, not os.environ:

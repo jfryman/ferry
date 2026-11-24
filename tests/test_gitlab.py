@@ -33,6 +33,8 @@ class FakeGitLab:
 
     def _tags(self, method, path, data):
         name = path.rsplit("/", 1)[-1].replace("%2F", "/")
+        if method == "GET" and name == "tags":
+            return 200, json.dumps(list(self.tags.values())).encode()
         if method == "POST":
             if data["tag_name"] in self.tags:
                 return 400, b'{"message":"Tag ferry-lock-x already exists"}'
@@ -171,6 +173,16 @@ def test_tag_locks_are_exclusive(gl):
     assert locks.release("homelab", 2) is False  # not the holder
     assert locks.release("homelab", 1) is True
     assert locks.get("homelab") is None
+
+
+def test_tag_locks_release_all(gl):
+    fake, client, be = gl
+    locks = GitLabTagLocks(client, "infra/ansible")
+    for inv, holder in (("homelab", 1), ("work", 1), ("lab", 2)):
+        locks.try_acquire(new_lock(inv, holder, "sha", "pip"))
+    fake.tags["v1.0"] = {"name": "v1.0", "message": "", "target": "x"}
+    assert locks.release_all(1) == ["homelab", "work"]
+    assert sorted(fake.tags) == ["ferry-lock-lab", "v1.0"]
 
 
 def test_unreadable_lock_is_held_not_free(gl):
