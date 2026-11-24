@@ -2,6 +2,42 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## [0.2.1] - 2026-11-24
+
+Hardening and observability for `ferry serve`, from the 0.2.0 maintainer review (#11–#17). Both
+backends (GitHub and GitLab) get every change.
+
+### Security
+- **Replays** (#11, #20): a delivery counts as a duplicate if its id *or* a digest of its exact
+  body has been seen. The id isn't covered by GitHub's signature. Seen deliveries are kept in the
+  state file for 7 days, so this holds across restarts. Events whose own timestamps are older than
+  `FERRY_WEBHOOK_MAX_AGE_MINUTES` (default 10) are refused, close events included: a replayed close
+  would otherwise free a reopened PR's locks. The timestamps checked are a comment's
+  `created_at`/`updated_at` and a PR's `updated_at`.
+- **Comments run the commit they were written about** (#12, #32). `/ferry plan|apply` is pinned to
+  the head as of the comment, and `--sha <commit>` names it outright. A head that arrived after the
+  comment, or one ferry never saw arrive, is refused with a note. A queued job whose PR moved posts
+  "not run".
+- **Apply gates run before credentials** (#13, #32): a refused apply costs no OpenBao login and no
+  certificate.
+- **HTTP limits** (#15, #20): a 1 MiB body cap (`FERRY_MAX_BODY_BYTES`), a 15 s socket timeout and
+  at most 32 concurrent connections. Chunked bodies and bad lengths are refused.
+
+### Added
+- **`GET /metrics`** (#16, #34), in Prometheus format: jobs by action and result, job durations,
+  jobs queued, webhook rejects by reason, queue depth, locks held and the build version. Label values come
+  only from fixed sets: no users, commits, error text or credentials.
+- **`GET /jobs`** (#16, #34): a bounded, read-only job history in the state file
+  (`FERRY_JOB_HISTORY`, default 200).
+- **The local lab runs under rootless podman** (#17, #35): `deploy/local/podman-docker` (keep-id
+  user namespaces), a persistent `podman system service` via `CONTAINER_HOST`, and `lab.sh replay`.
+
+### Fixed
+- Closing a PR releases its locks straight from the lock table, with no git fetch and no
+  `ferry.yaml`. An unreachable code host no longer leaks the lock, and an inventory dropped from
+  `ferry.yaml` no longer keeps its lock forever. A PR reopened before the job runs keeps its locks
+  (#14, #33).
+
 ## [0.2.0] - 2026-11-24
 
 ferry runs as a service: `ferry serve`, an Atlantis-style webhook service for a GitHub App or a
@@ -44,6 +80,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[0.2.1]: https://github.com/jfryman/ferry/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jfryman/ferry/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jfryman/ferry/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jfryman/ferry/releases/tag/v0.1.0
