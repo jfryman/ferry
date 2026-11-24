@@ -2,6 +2,14 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## [Unreleased]
+
+### Changed
+- **Higher dependency floors** (#80): `PyYAML>=6.0.4`, `cryptography>=50.0.2` (the `service` and
+  `test` extras) and `pytest>=9.2.0`, and `setuptools>=84.2.1` to build. If you install ferry into an
+  environment that pins older versions, raise those pins. The test suite passes against exactly
+  these versions. Supersedes Dependabot #75–#78.
+
 ## [0.4.1] - 2026-11-24
 
 ### Added
@@ -16,6 +24,11 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   characters removed; any other body (a proxy's page) still shows only the status.
 - A failed `ssh-keygen` (for example a uid with no passwd entry in a container) is a clean
   `ferry run` error, not a traceback (#68).
+
+### Docs
+- The README is short now, with topic docs under `docs/`, an `AGENTS.md`, and working diagrams (#66).
+- `SECURITY.md` (private reporting, supported versions, the 0.1.x approval advisory); the Nomad
+  example is on v0.4.0; the CLI docstring lists `run`, `executor` and `switch` (#71, #72).
 
 ## [0.4.0] - 2026-11-24
 

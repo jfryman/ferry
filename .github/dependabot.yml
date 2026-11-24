@@ -1,11 +1,24 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Dependabot version updates. Security alerts are separate (repository settings).
 version: 2
 updates:
-  - package-ecosystem: "pip" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  # pyproject.toml: runtime, service and test dependency floors.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Workflow actions are pinned by commit SHA with a version comment; Dependabot bumps both.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The service image's base (Dockerfile) and the lab's SSH target. The lab's OpenBao image is an
+  # ARG default (deploy/local/operator.Dockerfile, up.sh): bump it by hand with OpenBao releases.
+  - package-ecosystem: "docker"
+    directories: ["/", "/deploy/local/target"]
     schedule:
       interval: "weekly"
