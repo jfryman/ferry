@@ -108,3 +108,14 @@ check `can_apply(commenter)` in the webhook handler, so a refused request costs 
 credential (the engine still re-checks every gate). The queue is bounded (`max_queued_jobs`, 503 when
 full), so commenters on a public repo can't pile up unlimited jobs, and `/healthz` (unauthenticated)
 no longer returns error text, which can name internal hosts and paths.
+
+## Certificate lifetime, job timeout, redaction of job credentials
+Found reviewing the service (2026-11-23). A signed certificate outlives its job: revoking the job's
+token doesn't revoke the cert. So the service can ask for an explicit `ttl` and `valid_principals`
+(FERRY_OPENBAO_SSH_TTL / _PRINCIPAL) instead of taking the role's defaults, and runs can be killed
+after FERRY_JOB_TIMEOUT_MINUTES (the whole process group, so ssh children go too). Keep the timeout
+below the cert TTL, otherwise a long apply fails on new connections halfway. The job's OpenBao token
+exists only in the per-job env, which the default Redactor (os.environ) never saw: the service now
+builds the redactor from os.environ plus the job env, and the runner echoes redacted lines (in the
+service the echo goes to the service log, not a CI log). A failed token revoke is logged, not swallowed.
+Kubernetes auth needs no code: its login body is the same `{role, jwt}` as the jwt method.
