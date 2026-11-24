@@ -140,4 +140,4 @@ def test_a_plan_over_hundreds_of_hosts_fits_the_comment_limit(env):
 def test_redactor_masks_extra_values():
     red = Redactor([], [], [], environ={}, values=["hunter2-vault", "x"])
     assert red.text("pw is hunter2-vault") == "pw is [REDACTED]"
-    assert red.text("x marks") == "x marks"  # too short to mask safely
+    assert red.text("x marks") == "[REDACTED] marks"  # explicitly supplied secrets mask even one character
