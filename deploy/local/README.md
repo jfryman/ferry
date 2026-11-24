@@ -4,7 +4,8 @@ One command stands up everything a production ferry deployment has, in Docker on
 you can replicate the setup, poke at it and change ferry based on what you find. It was built and
 run from scratch on Nov 23, 2026; the walkthrough below is that run's output, trimmed.
 
-Needs: Docker, bash, git, curl, openssl. Nothing is installed on the host; Python runs in the images.
+Needs: Docker or rootless podman (see [below](#rootless-podman)), bash, git, curl, openssl. Nothing
+is installed on the host; Python runs in the images.
 
 ```bash
 deploy/local/up.sh        # ~15 s after the first image build; re-run to start from scratch
@@ -12,6 +13,33 @@ deploy/local/lab.sh open  # GitHub says: PR #1 opened by pip (who has write acce
 deploy/local/lab.sh comments
 deploy/local/down.sh      # stop; the lab dir (/tmp/ferry-lab, or $LAB_DIR) is kept for inspection
 ```
+
+## Rootless podman
+
+The scripts drive podman themselves when there's no Docker (`runtime.sh`; force it with
+`LAB_RUNTIME=podman`). Two things differ from Docker, and the scripts handle both:
+
+- **User namespaces.** Rootless podman maps container uids onto your subuid range, so a container
+  can't write the bind-mounted lab dir, and you can't delete what it wrote. `podman-docker`, the
+  `docker` the scripts use under podman, adds `--userns=keep-id` to `run -u $(id -u):$(id -g)` (you,
+  inside and out) and `--userns=keep-id:uid=10001,gid=10001` to the service container (the image's
+  `ferry` user is you on the host). The executor runs as 10002 with no keep-id: it only reads the
+  work dir. `up.sh` wipes the lab dir with `podman unshare rm -rf`.
+- **Containers belong to the shell that started them.** Plain `podman run` parents each container's
+  conmon on your session. Where the whole process tree is killed when a command ends (some CI
+  runners, agent sandboxes, `systemd-run --scope`), the containers die with it, while `podman ps`
+  can still say "Up". Run a podman API service in a session that persists, and point the lab at
+  it. The shim then uses `podman --remote`:
+
+  ```bash
+  podman system service --time=0 &          # or: systemctl --user enable --now podman.socket
+  export CONTAINER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+  deploy/local/up.sh
+  ```
+
+If podman panics about its pause process after an upgrade, run `podman system migrate` (repeat it
+until it stops panicking). Checked with podman 5.7 (rootless, overlay): the full loop, `lab.sh
+evil`/`leakcheck` ("0 of 3"), and `lab.sh replay` ("duplicate delivery").
 
 ## What's running
 
@@ -69,6 +97,7 @@ Each `lab.sh` command delivers what GitHub would, then waits for ferry's job and
    - `lab.sh apply` is now refused, because james's approval was for the old head.
 5. **`lab.sh open mallory`**: a PR event from a user without write access. ferry posts one "waiting for `/ferry plan`" comment and doesn't plan. `lab.sh plan mallory` is refused; `lab.sh plan` (james) plans.
 6. **`lab.sh close`**: the lock is released (`lab.sh locks` returns `[]`).
+7. **`lab.sh replay`**: re-sends the last delivery's exact signed body under a new `X-GitHub-Delivery`. ferry answers `duplicate delivery`, because it remembers body digests, not only ids. `curl -s localhost:18080/metrics` shows `ferry_webhook_rejected_total{reason="duplicate"} 1` next to the job counters, and `curl -s localhost:18080/jobs` shows the job history.
 
 ## Finding from the first run (fixed in this PR)
 

@@ -1,6 +1,7 @@
 """A stand-in for api.github.com: just enough for ferry serve and one PR (number 1).
 
-State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_head sets the
+State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_pr_state
+{"state": "closed"|"open"} closes or reopens the PR, /_head sets the
 PR head SHA (after you push to the PR branch). The branch has one ruleset (one approving review);
 POST /_rules {"rules": [...]} replaces its rules (GitHub's /rules/branches shape), e.g. to require
 two approvals and watch apply refuse. Run with the ferry image's Python.
@@ -14,7 +15,7 @@ R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
 WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip").split(","))
 # Like a fresh repo with one ruleset: one approving review on main.
-state = {"comments": [], "reviews": [],
+state = {"comments": [], "reviews": [], "pr_state": "open",
          "rules": [{"type": "pull_request", "ruleset_id": 1,
                     "parameters": {"required_approving_review_count": 1}}]}
 
@@ -43,7 +44,7 @@ def gql_pr():
 
 def pr():
     return {"number": 1, "head": {"sha": head(), "ref": "feature", "repo": {"full_name": REPO}},
-            "base": {"ref": "main"}, "user": {"login": "pip"}, "state": "open", "merged": False,
+            "base": {"ref": "main"}, "user": {"login": "pip"}, "state": state["pr_state"], "merged": False,
             "draft": False, "mergeable": True, "mergeable_state": "clean", "html_url": "http://lab/pull/1"}
 
 
@@ -99,6 +100,9 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/_rules":
             state["rules"] = d.get("rules", [])
             return self._j(200, {"rules": state["rules"]})
+        if self.path == "/_pr_state":  # {"state": "closed"} before a close webhook, "open" to reopen
+            state["pr_state"] = d.get("state", "open")
+            return self._j(200, {"state": state["pr_state"]})
         if self.path == "/_approve":
             state["reviews"].append({"user": {"login": d.get("user", "james")}, "state": "APPROVED",
                                      "commit_id": head()})

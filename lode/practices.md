@@ -13,6 +13,9 @@
   (Nomad-style JWT, SSH CA, vault password) + an sshd host trusting the CA + a fake GitHub; walk the
   loop with `deploy/local/lab.sh` (guide: `deploy/local/README.md`). Re-run it after any change to
   the service, credentials or workspace code. It caught the cross-job SSH ControlPath leak (Nov 23).
+  Under rootless podman the scripts use `deploy/local/podman-docker` (keep-id user namespaces); where
+  a command's process tree is killed when it ends (agent sandboxes, some CI), export
+  `CONTAINER_HOST` for a persistent `podman system service --time=0` first.
 
 ## Merging
 
