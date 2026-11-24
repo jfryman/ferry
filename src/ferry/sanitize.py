@@ -40,17 +40,23 @@ class Redactor:
         env_vars: list[str] | None = None,
         sensitive_paths: list[str] | None = None,
         environ: dict[str, str] | None = None,
+        values: list[str] | None = None,
     ):
+        """`values`: exact secrets that live outside the environment (the vault password file's
+        contents); masked like credential env values, if 6+ characters long."""
         environ = os.environ if environ is None else environ
         self._regexes = [re.compile(p, re.DOTALL) for p in BUILTIN_PATTERNS + list(patterns or [])]
-        values = set()
+        found = set()
         for name, value in environ.items():
             if not value or len(value) < 8:
                 continue
             if name in (env_vars or []) or _CRED_NAME.search(name):
-                values.add(value)
+                found.add(value)
+        for value in values or []:
+            if value and len(value) >= 6:
+                found.add(value)
         # Longest first so a value containing another is masked whole.
-        self._values = sorted(values, key=len, reverse=True)
+        self._values = sorted(found, key=len, reverse=True)
         self._paths = list(sensitive_paths or [])
 
     def text(self, s: str | None) -> str | None:

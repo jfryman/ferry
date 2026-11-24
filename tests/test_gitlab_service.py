@@ -691,3 +691,20 @@ def test_a_note_that_failed_mid_check_can_be_redelivered(world):
     world.gl.routes[("GET", MR)] = route
     assert world.svc.handle("Note Hook", "r-2", SECRET.decode(), json.dumps(ev, indent=1).encode()) == \
         (202, "plan queued")
+
+
+# ---- #24 on GitLab: signed, anchored markers --------------------------------------------------------
+
+def test_an_unsigned_marker_from_the_bot_account_does_not_make_a_plan(world):
+    import json as _json
+    from ferry import render
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    fake = {"v": 1, "inventory": "homelab", "sha": world.sha, "limit": "ntp-1", "everything": False,
+            "noop": False, "clean": True, "at": NOW, "config": "x"}
+    world.notes.append({"id": 99, "author": {"username": BOT}, "created_at": "t",
+                        "body": "### ferry plan\n\n" + render.marker("plan", fake)})
+    result, reasons = apply_reasons(world, "forged-1")
+    assert not result["ok"] and any("no ferry plan" in r for r in reasons)
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert render.trusted_marker(world.notes[-1]["body"], world.svc.marker_key()) is not None

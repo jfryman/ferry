@@ -191,6 +191,12 @@ class Service:
     def __post_init__(self):
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self.last_job: dict = {}
+        self._job_red: Redactor | None = None  # the running job's redactor, for its error report
+
+    def marker_key(self) -> bytes:
+        """Signs ferry's plan/apply markers: derived from the webhook secret, which only the service
+        (and the code host) holds, never a PR or a playbook."""
+        return hmac.new(self.secret, b"ferry plan marker v1", hashlib.sha256).digest()
 
     # ---- webhook (fast path: decide and enqueue) ------------------------------------------------
 
@@ -400,6 +406,7 @@ class Service:
     def run_job(self, job: Job) -> dict:
         started = self.clock()
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
+        self._job_red = None
         try:
             if job.action == "unlock":
                 result.update(self._unlock(job))
@@ -456,9 +463,20 @@ class Service:
 
     def _redactor(self, cfg, env: dict) -> Redactor:
         # The job's own credentials (OpenBao token, ...) live only in the per-job env, not os.environ:
-        # redact their values too, in comments and in the echoed log.
-        return Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths,
-                        environ={**os.environ, **env})
+        # redact their values too, in comments and in the echoed log. The vault password lives in a
+        # file: its contents are masked as well (#24).
+        values = []
+        pw_file = env.get("ANSIBLE_VAULT_PASSWORD_FILE")
+        if pw_file:
+            try:
+                raw = Path(pw_file).read_text()
+                values += [raw, raw.strip()]
+            except OSError:
+                log.warning("couldn't read the vault password file to redact it")
+        red = Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths,
+                       environ={**os.environ, **env}, values=values)
+        self._job_red = red  # the newest one has the most to mask: the error report uses it
+        return red
 
     def _runner(self, cfg, checkout: Path, env: dict, red: Redactor):
         runner = self.runner_factory(checkout, cfg.guard.busy_marker, env)
@@ -472,7 +490,7 @@ class Service:
         red = self._redactor(cfg, env)
         return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
                       clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved",
-                      default_branch=self.settings.default_branch)
+                      default_branch=self.settings.default_branch, marker_key=self.marker_key())
 
     def _report_moved(self, job: Job, why: str) -> None:
         self._report_not_run(job, f"{why}. Nothing ran against the hosts. Read the new commits, then "
@@ -495,6 +513,7 @@ class Service:
                                 f"after the `/ferry {job.action}` comment")
         main_dir, _ = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")  # from the default branch, never the PR
+        self._redactor(cfg, {})  # the error report masks ferry.yaml's patterns from here on
         # Only PRs into the default branch or ferry.yaml's base_branches (#22): checked before the PR
         # is checked out or any credential exists. The engine checks again against live state.
         why = Engine(cfg, main_dir, _NoRunner(), default_branch=self.settings.default_branch).base_reason(cr)
@@ -509,7 +528,8 @@ class Service:
                 # Every apply gate first, without credentials: a refused apply (no approval, a stale
                 # plan) costs no OpenBao login and no certificate. apply() checks again with them.
                 pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
-                             clock=self.clock, default_branch=self.settings.default_branch)
+                             clock=self.clock, default_branch=self.settings.default_branch,
+                             marker_key=self.marker_key())
                 for inv in invs:
                     out = pre.apply_precheck(job.pr, job.sha, job.user, inv)
                     if out is not None:
@@ -543,7 +563,9 @@ class Service:
         return {"ok": True, "sha": sha[:12], "drift": results}
 
     def _report_error(self, job: Job, error: str) -> None:
-        red = Redactor([], [], [])
+        # The job's own redactor (ferry.yaml patterns, its credentials and vault password), or, if the
+        # job failed before it had one, the built-in patterns and the service's environment.
+        red = self._job_red or Redactor([], [], [])
         try:
             self.vcs.post_note(job.pr, f"### ferry {job.action}: error\n\nferry couldn't finish: "
                                        f"`{red.text(error)[:500]}`. Check the service log, then try "

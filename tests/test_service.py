@@ -834,3 +834,67 @@ def test_duplicate_comments_are_counted(world):
     world.svc.receive({"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "a", "X-Hub-Signature-256": sign(b1)}, b1)
     world.svc.receive({"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "b", "X-Hub-Signature-256": sign(b2)}, b2)
     assert 'ferry_webhook_rejected_total{reason="duplicate"} 1' in world.svc.render_metrics()
+
+
+# ---- #24: signed markers, the vault password and the error path ----------------------------------
+
+def creds_with_vault_password(monkeypatch, tmp_path, password="vault-pw-Correct-Horse", token="s.jobtoken12345678"):
+    import contextlib
+    from ferry import service as service_mod
+    pw = tmp_path / "vault-password"
+    pw.write_text(password + "\n")
+
+    @contextlib.contextmanager
+    def creds(bao, ssh_user):
+        yield {"ANSIBLE_REMOTE_USER": "root", "ANSIBLE_VAULT_PASSWORD_FILE": str(pw), "VAULT_TOKEN": token}
+    monkeypatch.setattr(service_mod, "job_credentials", creds)
+    return password, token
+
+
+def test_the_service_signs_its_markers(world):
+    from ferry import render
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    body = world.comments[-1]["body"]
+    assert render.trusted_marker(body, world.svc.marker_key())[1]["sha"] == world.sha
+    assert render.trusted_marker(body, b"other key") is None
+
+
+def test_a_task_that_prints_the_vault_password_is_masked(world, monkeypatch, tmp_path):
+    password, _ = creds_with_vault_password(monkeypatch, tmp_path)
+    world.runner.queue = [([ev_result("ntp-1", "Leak", "changed", diff=[
+        {"before": "", "after": f"pw={password.upper()} and {password}\n", "before_header": "/tmp/x",
+         "after_header": "/tmp/x"}]), ev_stats(**{"ntp-1": stats(changed=1)})], 0)]
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    body = world.comments[-1]["body"]
+    assert password not in body and "[REDACTED]" in body
+
+
+def test_the_error_path_uses_the_jobs_redactor(world, monkeypatch, tmp_path):
+    password, token = creds_with_vault_password(monkeypatch, tmp_path)
+
+    class Boom:
+        def run(self, req):
+            raise RuntimeError(f"ansible died: token {token} password {password} secret=hunter22secret")
+    world.svc.runner_factory = lambda checkout, marker, env: Boom()
+    world.deliver("pull_request", world.pr_event())
+    [result] = world.drain()
+    body = world.comments[-1]["body"]
+    assert "ferry plan: error" in body
+    assert token not in body and password not in body and "hunter22secret" not in body
+    assert "[REDACTED]" in body
+
+
+def test_the_error_path_applies_ferry_yaml_patterns(repo, tmp_path, monkeypatch):
+    text = (repo / "ferry.yaml").read_text()
+    (repo / "ferry.yaml").write_text(text.replace("policy:", "redact:\n  patterns: ['corp-[0-9]{6}']\npolicy:"))
+    w = World(repo, tmp_path / "w")
+
+    class Boom:
+        def run(self, req):
+            raise RuntimeError("failed on corp-123456")
+    w.svc.runner_factory = lambda checkout, marker, env: Boom()
+    w.deliver("pull_request", w.pr_event())
+    w.drain()
+    assert "corp-123456" not in w.comments[-1]["body"]
