@@ -5,17 +5,19 @@ LAB=${LAB_DIR:-/tmp/ferry-lab}
 SECRET=$(cat "$LAB/secrets/webhook-secret")
 REPO=acme/ansible
 
-deliver() {  # deliver EVENT BODY
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+deliver() {  # deliver EVENT BODY [DELIVERY-ID]; keeps the last one in $LAB/last-delivery for `replay`
   local sig
   sig="sha256=$(printf '%s' "$2" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)"
-  curl -s -X POST localhost:18080/webhook -H "X-GitHub-Event: $1" -H "X-GitHub-Delivery: lab-$(date +%s%N)" \
+  printf '%s\n%s\n' "$1" "$2" > "$LAB/last-delivery"
+  curl -s -X POST localhost:18080/webhook -H "X-GitHub-Event: $1" -H "X-GitHub-Delivery: ${3:-lab-$(date +%s%N)}" \
     -H "X-Hub-Signature-256: $sig" -H "Content-Type: application/json" --data-binary "$2"
 }
 pr_event() {  # pr_event ACTION AUTHOR
-  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"pull_request\":{\"number\":1,\"draft\":false,\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
+  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"pull_request\":{\"number\":1,\"draft\":false,\"updated_at\":\"$(now)\",\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
 }
 comment() {  # comment USER BODY
-  deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"user\":{\"login\":\"$1\"},\"body\":\"$2\"}}"
+  deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"$1\"},\"body\":\"$2\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
 }
 wait_idle() {  # until the worker has nothing queued and the last job changed
   local before; before=$(curl -s localhost:18080/healthz)
@@ -41,6 +43,8 @@ case "${1:-help}" in
             git -C "$LAB/src" rev-parse HEAD > "$LAB/pr_head"
             pr_event synchronize pip; echo; wait_idle ;;
   close)    pr_event closed pip; echo; wait_idle ;;
+  replay)   # re-send the last delivery's exact signed body under a new delivery id: expect a duplicate
+            { read -r ev; body=$(cat); } < "$LAB/last-delivery"; deliver "$ev" "$body" "replay-$(date +%s%N)"; echo ;;
   evil)     # a hostile PR (passes the static policy): during the plan, on the controller, it tries the
             # service's secret files, dumps its environment and every readable /proc/*/environ, and
             # ships it all to the target with the job's certificate. Then `lab.sh leakcheck`.

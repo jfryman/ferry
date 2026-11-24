@@ -20,6 +20,8 @@ from ferry.workspace import Workspace
 
 SECRET = b"whsec"
 BOT = "ferry-acme[bot]"
+NOW = 1_800_000_000.0
+NOW_ISO = "2027-01-15T08:00:00Z"  # NOW, as GitHub writes timestamps
 
 
 def git(cwd, *args):
@@ -89,7 +91,7 @@ class World:
             workspace=Workspace(tmp_path / "work", f"file://{bare}"),
             secret=SECRET,
             runner_factory=self._runner,
-            clock=lambda: 1_800_000_000.0,
+            clock=lambda: NOW,
         )
 
     def _runner(self, checkout, marker, env):
@@ -102,20 +104,23 @@ class World:
         return 201, c
 
     def deliver(self, event, payload, delivery=None):
-        body = json.dumps(payload).encode()
         self._n = getattr(self, "_n", 0) + 1
+        # Real deliveries differ (ids, timestamps); a test's repeated payloads must too, or the
+        # body-digest dedupe would (rightly) call them duplicates.
+        body = json.dumps({**payload, "_seq": self._n}).encode()
         delivery = delivery or f"delivery-{self._n}"
         return self.svc.handle(event, delivery, sign(body), body)
 
-    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None):
+    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None, at=NOW_ISO):
         return {"action": action, "repository": {"full_name": "acme/ansible"},
                 "sender": {"login": sender or author},
-                "pull_request": {"number": 1, "draft": draft, "user": {"login": author},
+                "pull_request": {"number": 1, "draft": draft, "user": {"login": author}, "updated_at": at,
                                  "head": {"sha": self.sha, "repo": {"full_name": "evil/ansible" if fork else "acme/ansible"}}}}
 
-    def comment_event(self, body, user="james"):
+    def comment_event(self, body, user="james", at=NOW_ISO, updated=None):
         return {"action": "created", "repository": {"full_name": "acme/ansible"},
-                "issue": {"number": 1, "pull_request": {}}, "comment": {"user": {"login": user}, "body": body}}
+                "issue": {"number": 1, "pull_request": {}},
+                "comment": {"user": {"login": user}, "body": body, "created_at": at, "updated_at": updated or at}}
 
     def drain(self):
         out = []
@@ -296,3 +301,136 @@ def test_job_credentials_are_redacted(world, repo):
     cfg = config_mod.load(repo / "ferry.yaml")
     red = world.svc._redactor(cfg, {"VAULT_TOKEN": "s.jobtoken-abcdef123456"})
     assert "s.jobtoken-abcdef123456" not in red.text("debug: s.jobtoken-abcdef123456")
+
+
+# ---- replays (#11) -------------------------------------------------------------------------------
+
+
+def test_a_replayed_body_is_a_duplicate_under_any_delivery_id(world):
+    body = json.dumps(world.comment_event("/ferry plan")).encode()
+    assert world.svc.handle("issue_comment", "d1", sign(body), body)[1] == "plan queued"
+    # X-GitHub-Delivery isn't signed: the same signed body under a fresh id is still the same event.
+    assert world.svc.handle("issue_comment", "d2", sign(body), body)[1] == "duplicate delivery"
+    assert world.svc.handle("issue_comment", "", sign(body), body)[1] == "duplicate delivery"
+    assert world.svc.jobs.qsize() == 1
+
+
+def test_seen_deliveries_survive_a_restart(world, tmp_path):
+    from ferry.state import SQLiteState
+    world.svc.state = SQLiteState(tmp_path / "state.db")
+    body = json.dumps(world.comment_event("/ferry plan")).encode()
+    assert world.svc.handle("issue_comment", "d1", sign(body), body)[1] == "plan queued"
+    world.svc.state = SQLiteState(tmp_path / "state.db")  # a new process, same file
+    assert world.svc.handle("issue_comment", "d9", sign(body), body)[1] == "duplicate delivery"
+
+
+@pytest.mark.parametrize("kw,why", [
+    ({"at": "2027-01-15T07:49:00Z"}, "stale event"),                           # 11 minutes old
+    ({"at": "2027-01-15T07:30:00Z", "updated": NOW_ISO}, "stale event"),         # created long ago
+    ({"updated": "2027-01-15T07:40:00Z"}, "stale event"),                       # updated_at past the window
+    ({"at": "2027-01-15T08:10:00Z"}, "in the future"),
+    ({"at": ""}, "no readable timestamp"),
+])
+def test_old_comments_are_refused(world, kw, why):
+    assert why in world.deliver("issue_comment", world.comment_event("/ferry apply", **kw))[1]
+    assert world.svc.jobs.empty() and not world.comments
+
+
+def test_recent_comments_pass(world):
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan", at="2027-01-15T07:51:00Z"))[1] == \
+        "plan queued"
+
+
+def test_a_replayed_close_releases_nothing(world):
+    # An old `closed` replayed after the PR reopened would free an open PR's locks.
+    assert "stale" in world.deliver("pull_request", world.pr_event("closed", at="2027-01-14T08:00:00Z"))[1]
+    assert "stale" in world.deliver("pull_request", world.pr_event("opened", at="2027-01-14T08:00:00Z"))[1]
+    assert world.svc.jobs.empty()
+
+
+def test_a_delivery_refused_for_a_full_queue_can_be_retried(world):
+    world.svc.settings.max_queued_jobs = 1
+    world.svc.__post_init__()
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    body = json.dumps(world.comment_event("/ferry apply")).encode()
+    assert world.svc.handle("issue_comment", "r1", sign(body), body)[0] == 503
+    world.svc.jobs.get()
+    assert world.svc.handle("issue_comment", "r1", sign(body), body)[1] == "apply queued"  # the retry
+
+
+def test_parse_time():
+    from ferry.service import parse_time
+    for s in ("2027-01-15T08:00:00Z", "2027-01-15 08:00:00 UTC", "2027-01-15T08:00:00.000Z",
+              "2027-01-15T09:00:00+01:00", "2027-01-15 09:00:00 +0100"):
+        assert parse_time(s) == NOW, s
+    assert parse_time("yesterday") is None and parse_time(None) is None and parse_time("") is None
+
+
+def test_state_is_bounded(tmp_path, monkeypatch):
+    from ferry import state as state_mod
+    monkeypatch.setattr(state_mod, "DELIVERY_MAX_ROWS", 3)
+    for st in (state_mod.MemoryState(), state_mod.SQLiteState(tmp_path / "s.db")):
+        for i in range(5):
+            assert st.first_sight([f"k{i}"], 1000.0 + i)
+        assert st.first_sight(["k0"], 1006.0)  # evicted by the cap
+        assert not st.first_sight(["k4"], 1006.0)
+        assert st.first_sight(["k4"], 1006.0 + state_mod.DELIVERY_TTL + 10)  # expired by the TTL
+
+
+# ---- HTTP limits (#15) ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def http(world):
+    from ferry.service import BoundedHTTPServer
+    world.svc.settings.max_body_bytes = 4096
+    world.svc.settings.request_timeout_seconds = 0.5
+    httpd = BoundedHTTPServer(("127.0.0.1", 0), make_handler(world.svc), max_connections=2)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield httpd.server_address
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def raw(addr, data: bytes, wait=2.0) -> bytes:
+    import socket
+    with socket.create_connection(addr, timeout=wait) as s:
+        s.sendall(data)
+        out = b""
+        try:
+            while chunk := s.recv(4096):
+                out += chunk
+        except TimeoutError:
+            return out + b"<no hangup>"
+        return out  # the server closed the connection
+
+
+def test_http_body_limits(http):
+    head = b"POST /webhook HTTP/1.1\r\nHost: x\r\nX-GitHub-Event: ping\r\n"
+    assert b" 413 " in raw(http, head + b"Content-Length: 5000\r\n\r\n")
+    assert b" 400 " in raw(http, head + b"Content-Length: nope\r\n\r\n")
+    assert b" 400 " in raw(http, head + b"\r\n")
+    assert b" 411 " in raw(http, head + b"Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+
+
+def test_http_drops_a_stalled_client(http):
+    import time as _time
+    t = _time.monotonic()
+    # Promises 100 bytes, sends 2, then waits: the server hangs up after its timeout.
+    assert raw(http, b"POST /webhook HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{}", wait=5) == b""
+    assert _time.monotonic() - t < 3
+
+
+def test_http_caps_concurrent_connections(http):
+    import socket
+    held = [socket.create_connection(http) for _ in range(2)]  # both slots, stalled
+    try:
+        _ = [s.sendall(b"GET /healthz HTTP/1.1\r\n") for s in held]
+        import time as _time
+        _time.sleep(0.1)
+        assert raw(http, b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n", wait=0.3) == b""  # dropped at once
+    finally:
+        _ = [s.close() for s in held]
+    import time as _time
+    _time.sleep(0.7)  # the stalled ones time out, freeing their slots
+    assert b" 200 " in raw(http, b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")

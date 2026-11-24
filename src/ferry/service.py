@@ -14,6 +14,11 @@ Events:
   issue_comment "/ferry plan [inventory]"                     plan, if the commenter may
   issue_comment "/ferry apply [inventory]"                    apply (the engine checks every gate)
 
+Replays: X-GitHub-Delivery isn't covered by the signature, so a captured body could be resent under
+a new delivery id. ferry remembers both the delivery id and a digest of the signed body in its state
+file (state.SQLiteState, so it survives restarts), and refuses events whose own timestamps (the
+comment's created_at/updated_at, the PR's updated_at) are older than max_event_age_minutes.
+
 Plan rule: a plan runs the PR's playbooks (check mode, but check_mode: false tasks, lookups and
 plugins run for real) with root SSH access, so ferry plans automatically only for authors with write
 access; anyone else's PR waits for a `/ferry plan` comment from someone with write access.
@@ -31,10 +36,11 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -45,6 +51,7 @@ from .engine import Engine
 from .locks import LockStore
 from .runner import AnsibleRunner
 from .sanitize import Redactor
+from .state import MemoryState
 from .vcs.github import GitHubBackend
 from .webhook import COMMAND_RE
 from .workspace import CheckoutError, Workspace
@@ -61,6 +68,28 @@ def verify_signature(secret: bytes, body: bytes, header: str | None) -> bool:
         return False
     expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header)
+
+
+def parse_time(value) -> float | None:
+    """A code host timestamp as epoch seconds: GitHub's '2026-01-02T03:04:05Z', GitLab's
+    '2026-01-02 03:04:05 UTC' or ISO 8601 with an offset. None if missing or unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    s = re.sub(r"\s*(UTC|Z)$", "+00:00", s)
+    s = re.sub(r"\s+([+-]\d{2}):?(\d{2})$", r"\1:\2", s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def delivery_keys(delivery: str, body: bytes) -> list[str]:
+    """What makes a delivery a duplicate: its id, or the exact signed body under any id."""
+    return ([f"id:{delivery}"] if delivery else []) + ["body:" + hashlib.sha256(body).hexdigest()]
 
 
 @dataclass
@@ -83,6 +112,13 @@ class Settings:
     drift_write_report: bool = True
     max_queued_jobs: int = 50  # beyond this, webhooks get 503 (the code host retries or the user re-comments)
     job_timeout_minutes: float = 0.0  # 0: no limit. Keep it below the SSH certificate's TTL.
+    # Events whose own timestamps are older than this are refused (replays, very late redeliveries).
+    max_event_age_minutes: float = 10.0
+    max_clock_skew_seconds: float = 300.0  # how far in the future an event's timestamp may be
+    # HTTP: webhook bodies are small; cap them, and drop connections that stall.
+    max_body_bytes: int = 1024 * 1024
+    request_timeout_seconds: float = 15.0
+    max_connections: int = 32
 
 
 @dataclass
@@ -97,14 +133,13 @@ class Service:
     workspace: Workspace
     secret: bytes
     bao: OpenBao | None = None
+    state: MemoryState = field(default_factory=MemoryState)  # seen deliveries; SQLiteState in serve
     runner_factory: Callable[[Path, str, dict], object] = field(
         default=lambda repo, marker, env: AnsibleRunner(repo, marker, env=env))
     clock: Callable[[], float] = time.time
 
     def __post_init__(self):
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
-        self._seen: OrderedDict[str, None] = OrderedDict()
-        self._seen_lock = threading.Lock()
         self.last_job: dict = {}
 
     # ---- webhook (fast path: decide and enqueue) ------------------------------------------------
@@ -117,18 +152,38 @@ class Service:
     def handle(self, event: str, delivery: str, signature: str | None, body: bytes) -> tuple[int, str]:
         if not verify_signature(self.secret, body, signature):
             return 401, "bad signature"
-        with self._seen_lock:
-            if delivery and delivery in self._seen:
-                return 200, "duplicate delivery"
-            if delivery:
-                self._seen[delivery] = None
-                while len(self._seen) > 1000:
-                    self._seen.popitem(last=False)
+        return self._deduped(delivery, body, lambda: self._dispatch(event, delivery, body))
+
+    def _deduped(self, delivery: str, body: bytes, dispatch) -> tuple[int, str]:
+        """Run dispatch() once per delivery (by id and by body digest), persisted across restarts."""
+        keys = delivery_keys(delivery, body)
+        if not self.state.first_sight(keys, self.clock()):
+            return 200, "duplicate delivery"
+        status, text = dispatch()
+        if status >= 500:  # not acted on: let the code host's retry through
+            self.state.forget(keys)
+        return status, text
+
+    def _stale(self, *stamps) -> str | None:
+        """Why an event's own timestamps make it unacceptable (too old, in the future, missing)."""
+        now = self.clock()
+        parsed = [parse_time(s) for s in stamps]
+        if not parsed or any(t is None for t in parsed):
+            return "event has no readable timestamp"
+        oldest, newest = min(parsed), max(parsed)
+        if now - oldest > self.settings.max_event_age_minutes * 60:
+            return f"stale event (older than {self.settings.max_event_age_minutes:g} minutes)"
+        if newest - now > self.settings.max_clock_skew_seconds:
+            return "event timestamp is in the future"
+        return None
+
+    def _dispatch(self, event: str, delivery: str, body: bytes) -> tuple[int, str]:
         try:
             payload = json.loads(body)
         except ValueError:
             return 400, "bad json"
-        if payload.get("repository", {}).get("full_name", "").lower() != self.settings.repo.lower():
+        if not isinstance(payload, dict) or \
+                (payload.get("repository") or {}).get("full_name", "").lower() != self.settings.repo.lower():
             return 202, "not this service's repo"
         if event == "ping":
             return 200, "pong"
@@ -140,6 +195,10 @@ class Service:
 
     def _on_pull_request(self, p: dict, delivery: str) -> tuple[int, str]:
         pr, action = p["pull_request"], p.get("action")
+        # Every action, close included: a replayed `closed` would release an open PR's locks.
+        stale = self._stale(pr.get("updated_at"))
+        if stale:
+            return 202, stale
         number, sha, author = pr["number"], pr["head"]["sha"], pr["user"]["login"]
         if action == "closed":
             return self._enqueue(Job("unlock", number, sha, author, delivery=delivery))
@@ -169,6 +228,9 @@ class Service:
         m = COMMAND_RE.match(p["comment"].get("body", "").strip().splitlines()[0] if p["comment"].get("body") else "")
         if not m or not p["comment"]["body"].lstrip().startswith("/ferry"):
             return 202, "not a ferry command"
+        stale = self._stale(p["comment"].get("created_at"), p["comment"].get("updated_at"))
+        if stale:
+            return 202, stale
         action, inventory = m.group(1), m.group(2)
         number = p["issue"]["number"]
         # Both commands need write access, checked here: a refused request never costs a checkout or
@@ -303,9 +365,13 @@ class Service:
             self._enqueue(Job("drift"))
 
 
-def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
+def make_handler(service: Service, max_body: int | None = None):
+    max_body = max_body or service.settings.max_body_bytes
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "ferry"
+        # Socket timeout for every read and write: a client that stalls (slowloris) is dropped.
+        timeout = service.settings.request_timeout_seconds
 
         def _send(self, status: int, text: str) -> None:
             data = (text + "\n").encode()
@@ -326,10 +392,18 @@ def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
         def do_POST(self):
             if self.path != "/webhook":
                 return self._send(404, "not found")
-            length = int(self.headers.get("Content-Length") or 0)
+            if self.headers.get("Transfer-Encoding"):
+                return self._send(411, "Content-Length required")
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
             if length <= 0 or length > max_body:
+                self.close_connection = True  # don't read (or wait for) a body we refuse
                 return self._send(413 if length > max_body else 400, "bad length")
             body = self.rfile.read(length)
+            if len(body) != length:
+                return  # the client went away mid-body
             status, text = service.handle_request(self.headers, body)
             self._send(status, text)
 
@@ -339,11 +413,39 @@ def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
     return Handler
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on concurrent connections: past it, new ones are closed at once
+    instead of each getting a thread."""
+
+    daemon_threads = True
+
+    def __init__(self, addr, handler, max_connections: int = 32):
+        self._slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(addr, handler)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            log.warning("too many connections: dropped one from %s", client_address[0])
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def serve(service: Service, host: str = "0.0.0.0", port: int = 8080) -> None:
     stop = threading.Event()
     threading.Thread(target=service.worker, args=(stop,), daemon=True, name="ferry-worker").start()
     threading.Thread(target=service.drift_scheduler, args=(stop,), daemon=True, name="ferry-drift").start()
-    httpd = ThreadingHTTPServer((host, port), make_handler(service))
+    httpd = BoundedHTTPServer((host, port), make_handler(service), service.settings.max_connections)
     log.info("ferry service for %s listening on %s:%s", service.settings.repo, host, port)
     try:
         httpd.serve_forever()

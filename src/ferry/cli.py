@@ -31,6 +31,7 @@ from pathlib import Path
 from . import config as config_mod
 from .engine import Engine
 from .locks import GitLabTagLocks, SQLiteLocks
+from .state import SQLiteState
 from .runner import AnsibleRunner
 from .vcs.github import API as GITHUB_API
 from .vcs.github import GitHubBackend, GitHubClient
@@ -110,13 +111,15 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
 
   FERRY_VCS                      github or gitlab (or --vcs); unset: gitlab if FERRY_GITLAB_URL is set
   FERRY_WEBHOOK_SECRET_FILE      file holding the webhook secret (or FERRY_WEBHOOK_SECRET)
-  FERRY_LOCK_DB                  lock file on persistent storage (required)
+  FERRY_LOCK_DB                  state file on persistent storage (required): locks, seen deliveries
   FERRY_WORKDIR                  checkouts and caches (default /var/lib/ferry/work)
   FERRY_DEFAULT_BRANCH           GitHub: default main; GitLab: default the project's default branch
   FERRY_LISTEN                   host:port, default 0.0.0.0:8080 (POST /webhook, GET /healthz)
   FERRY_SSH_USER                 remote user for ansible (e.g. root)
   FERRY_DRIFT_INTERVAL_HOURS     0 (default) disables scheduled drift runs
   FERRY_STARTUP_ATTEMPTS         8 (default): tries to reach the code host at start, with backoff
+  FERRY_WEBHOOK_MAX_AGE_MINUTES  10 (default): refuse events whose own timestamps are older (replays)
+  FERRY_MAX_BODY_BYTES           1048576 (default): larger webhook bodies get 413
 
   GitHub App:
   FERRY_GITHUB_REPO              OWNER/NAME of the config repo (required)
@@ -236,7 +239,9 @@ def build_service(vcs: str | None = None):
         sys.exit(f"ferry serve: missing {', '.join(missing)}")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     common = dict(ssh_user=_env("FERRY_SSH_USER"), drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
-                  job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")))
+                  job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")),
+                  max_event_age_minutes=float(_env("FERRY_WEBHOOK_MAX_AGE_MINUTES", "10")),
+                  max_body_bytes=int(_env("FERRY_MAX_BODY_BYTES", str(1024 * 1024))))
     workdir = _env("FERRY_WORKDIR", "/var/lib/ferry/work")
     if kind == "gitlab":
         return _build_gitlab_service(required, secret(), token, common, workdir)
@@ -259,6 +264,7 @@ def build_service(vcs: str | None = None):
         settings=settings,
         vcs=vcs,
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
+        state=SQLiteState(required["FERRY_LOCK_DB"]),
         workspace=Workspace(workdir, f"{git_url}/{repo}.git", tokens),
         secret=secret().encode(),
         bao=_openbao(),
@@ -284,6 +290,7 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
         settings=settings,
         vcs=vcs,
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
+        state=SQLiteState(required["FERRY_LOCK_DB"]),
         workspace=Workspace(workdir, remote, token, change_ref="refs/merge-requests/{number}/head",
                             git_user="oauth2"),
         secret=secret.encode(),

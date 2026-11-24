@@ -171,3 +171,18 @@ off for its throwaway target.
 orchestrator, DNS or the network often isn't ready yet, and exiting then just waits for a restart
 (the local lab hit it under podman). Transient failures (unreachable, 5xx) are retried with backoff
 (`FERRY_STARTUP_ATTEMPTS`, default 8); a 4xx (bad token, wrong repo) still exits at once.
+
+## Replays: dedupe on the body, refuse old events, persist (#11)
+`X-GitHub-Delivery` isn't covered by the HMAC, and GitLab's token proves only that the sender knows
+the secret, so a delivery id alone can't identify a replay. The state file (`state.SQLiteState`, the
+same SQLite file as the locks) keeps both the delivery id and a SHA-256 of the body for 7 days,
+capped at 20k rows; a delivery answered 5xx (queue full) is forgotten so the code host's retry
+counts. On top, every event's own signed timestamps must be within `FERRY_WEBHOOK_MAX_AGE_MINUTES`
+(10) and at most 5 minutes in the future, closes included: a replayed close of a reopened PR would
+otherwise free its locks. An event with no readable timestamp is refused. Cost: a manual redelivery
+more than 10 minutes late is refused; comment again instead.
+
+## HTTP limits (#15)
+Webhook bodies are small, so the cap is 1 MiB (`FERRY_MAX_BODY_BYTES`), chunked bodies are refused
+(411), every socket read and write times out after 15 s, and `BoundedHTTPServer` closes connections
+past 32 at once instead of starting a thread for each. Still meant to sit behind a proxy.

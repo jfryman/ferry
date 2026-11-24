@@ -22,6 +22,8 @@ from ferry.workspace import Workspace, _git_env
 
 SECRET = b"glsecret"
 BOT = "project_9_bot"
+NOW = 1_800_000_000.0
+NOW_GL = "2027-01-15 08:00:00 UTC"  # NOW, as GitLab writes timestamps in hooks
 P = "/projects/acme%2Fansible"
 MR = f"{P}/merge_requests/1"
 PUSHED = "2026-11-20T12:00:00.000Z"  # when the MR's current head arrived
@@ -78,7 +80,7 @@ class World:
                                 git_user="oauth2"),
             secret=SECRET,
             runner_factory=self._runner,
-            clock=lambda: 1_800_000_000.0,
+            clock=lambda: NOW,
         )
 
     def mr_json(self):
@@ -99,21 +101,24 @@ class World:
 
     def deliver(self, event, payload, delivery=None, token=SECRET.decode()):
         self._n = getattr(self, "_n", 0) + 1
-        return self.svc.handle(event, delivery or f"uuid-{self._n}", token, json.dumps(payload).encode())
+        body = json.dumps({**payload, "_seq": self._n}).encode()  # distinct bodies, like real deliveries
+        return self.svc.handle(event, delivery or f"uuid-{self._n}", token, body)
 
-    def mr_event(self, action="open", draft=False, fork=False, oldrev=None, changes=None, project=None, user="bob"):
+    def mr_event(self, action="open", draft=False, fork=False, oldrev=None, changes=None, project=None, user="bob",
+                 at=NOW_GL):
         attrs = {"iid": 1, "action": action, "draft": draft, "source_project_id": 7 if fork else 9,
-                 "target_project_id": 9, "last_commit": {"id": self.sha}, "author_id": 2}
+                 "target_project_id": 9, "last_commit": {"id": self.sha}, "author_id": 2, "updated_at": at}
         if oldrev:
             attrs["oldrev"] = oldrev
         return {"object_kind": "merge_request", "user": {"username": user},
                 "project": project or {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": attrs, "changes": changes or {}}
 
-    def note_event(self, note, user="alice", noteable="MergeRequest"):
+    def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None):
         return {"object_kind": "note", "user": {"username": user},
                 "project": {"id": 9, "path_with_namespace": "acme/ansible"},
-                "object_attributes": {"note": note, "noteable_type": noteable, "action": "create"},
+                "object_attributes": {"note": note, "noteable_type": noteable, "action": "create",
+                                      "created_at": at, "updated_at": updated or at},
                 "merge_request": {"iid": 1, "state": "opened"}}
 
     def drain(self):
@@ -377,3 +382,34 @@ def test_serve_startup_retries_while_the_code_host_is_unreachable(monkeypatch):
     with pytest.raises(GitLabError):
         cli.build_service_with_retry(attempts=5, sleep=waits.append)
     assert len(calls) == 1
+
+
+# ---- replays (#11) -------------------------------------------------------------------------------
+
+
+def test_a_replayed_body_is_a_duplicate_under_any_uuid(world, tmp_path):
+    from ferry.state import SQLiteState
+    world.svc.state = SQLiteState(tmp_path / "state.db")
+    body = json.dumps(world.note_event("/ferry plan")).encode()
+    assert world.svc.handle("Note Hook", "u1", SECRET.decode(), body)[1] == "plan queued"
+    assert world.svc.handle("Note Hook", "u2", SECRET.decode(), body)[1] == "duplicate delivery"
+    world.svc.state = SQLiteState(tmp_path / "state.db")  # after a restart too
+    assert world.svc.handle("Note Hook", "u3", SECRET.decode(), body)[1] == "duplicate delivery"
+    assert world.svc.jobs.qsize() == 1
+
+
+@pytest.mark.parametrize("kw,why", [
+    ({"at": "2027-01-15 07:49:00 UTC"}, "stale event"),
+    ({"updated": "2027-01-15T07:40:00.000Z"}, "stale event"),
+    ({"at": "2027-01-15 08:10:00 UTC"}, "in the future"),
+    ({"at": None}, "no readable timestamp"),
+])
+def test_old_notes_are_refused(world, kw, why):
+    assert why in world.deliver("Note Hook", world.note_event("/ferry apply", **kw))[1]
+    assert world.svc.jobs.empty()
+
+
+def test_a_replayed_mr_close_releases_nothing(world):
+    assert "stale" in world.deliver("Merge Request Hook", world.mr_event("close", at="2027-01-14 08:00:00 UTC"))[1]
+    assert world.svc.jobs.empty()
+    assert world.deliver("Merge Request Hook", world.mr_event("close"))[1] == "unlock queued"
