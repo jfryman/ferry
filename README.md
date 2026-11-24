@@ -202,6 +202,31 @@ time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (o
   (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;
   the CI driver ignores those two because its apply job is part of that pipeline.
 
+## Container image
+
+`ghcr.io/jfryman/ferry`, built by GitHub Actions for **linux/amd64** and **linux/arm64**, with SBOM
+and provenance attestations. It's non-root (uid 10001 `ferry`; uid 10002 `ferry-run` for the
+executor), with ansible-core, git and ssh installed. Collections are installed per `requirements.yml` at run time.
+
+| Tag | Built from |
+|---|---|
+| `vX.Y.Z`, `X.Y`, `latest` | release tags |
+| `edge`, `sha-<short>` | every push to `main` |
+
+Pin a digest in production: `ghcr.io/jfryman/ferry:v0.2.0@sha256:...`.
+
+**One image, two commands.** The default command is `serve`. The executor is the same image run
+with `executor`, as another user, in its own container (see the next section):
+
+```bash
+docker run ... ghcr.io/jfryman/ferry:v0.2.0                    # ferry serve
+docker run -u 10002 ... ghcr.io/jfryman/ferry:v0.2.0 executor  # ferry executor
+```
+
+Host keys are checked (`ANSIBLE_HOST_KEY_CHECKING=True`). Mount known_hosts at
+`/etc/ssh/ssh_known_hosts` in whichever container runs the playbooks: the executor, or the service
+if you run without one.
+
 ## Playbooks run apart from the service (`ferry executor`)
 
 A plan runs the change's own playbooks, and a playbook can run code on the controller: lookups,
@@ -292,5 +317,7 @@ pip install -e '.[test]' 'ansible-core~=2.20.0'
 python -m pytest -q
 ```
 
-Release: bump `pyproject.toml` version, tag `vX.Y.Z`; CI publishes the wheel to this project's
-PyPI registry. Project notes for agents live in `lode/`.
+Release: see `lode/practices.md`. In short: bump the version in `pyproject.toml` and
+`ferry.__version__`, add a `CHANGELOG.md` entry, merge, then push an annotated tag `vX.Y.Z`. GitHub
+Actions builds and pushes the image, and you create a GitHub release from the changelog entry.
+Project notes for agents live in `lode/`.
