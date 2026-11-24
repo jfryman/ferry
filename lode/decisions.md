@@ -100,3 +100,11 @@ computed for the viewer (an App with bypass sees CLEAN). Checks posted by ferry'
 `FERRY_GITHUB_OWN_CHECKS` (service env, never the repo), are ignored so a required ferry check can't
 deadlock the apply. Unreadable rules (missing App permission) refuse, naming the permission. REST
 `mergeable_state` `blocked` no longer refuses by itself: the new check explains it.
+
+## Permission check before a job exists
+Found reviewing the service (2026-11-23): `/ferry apply` from anyone was queued, and the worker did
+the checkout, the OpenBao login and the SSH signing before the engine refused it. Now both commands
+check `can_apply(commenter)` in the webhook handler, so a refused request costs one API call and no
+credential (the engine still re-checks every gate). The queue is bounded (`max_queued_jobs`, 503 when
+full), so commenters on a public repo can't pile up unlimited jobs, and `/healthz` (unauthenticated)
+no longer returns error text, which can name internal hosts and paths.
