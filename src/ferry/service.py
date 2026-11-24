@@ -101,6 +101,11 @@ def delivery_keys(delivery: str, body: bytes) -> list[str]:
     return ([f"id:{delivery}"] if delivery else []) + ["body:" + hashlib.sha256(body).hexdigest()]
 
 
+def _valid_id(value) -> bool:
+    """A code host object id: a positive int (JSON true is not one)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def job_result(result: dict) -> str:
     """One of metrics.RESULTS: ok; skipped (the PR moved on); refused (a gate said no, nothing ran);
     failed (ansible ran and wasn't clean); error (ferry couldn't finish)."""
@@ -297,8 +302,16 @@ class Service:
         stale = self._stale(p["comment"].get("created_at"), p["comment"].get("updated_at"))
         if stale:
             return 202, stale
+        cid = p["comment"].get("id")
+        if not _valid_id(cid):
+            return 400, "comment id missing or malformed"
+        return self._once(self._comment_key("comment", self.settings.repo.lower(), cid),
+                          lambda: self._on_command(p, m, delivery))
+
+    def _on_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
         action, inventory, named = m.group(1), m.group(2), m.group(3)
         number = p["issue"]["number"]
+        user = p["comment"]["user"]["login"]
         # Both commands need write access, checked here: a refused request never costs a checkout or
         # a credential (the engine checks again, along with every other apply gate).
         if not self.vcs.can_apply(user):
@@ -311,6 +324,24 @@ class Service:
         if sha is None:
             return 202, f"{action} refused: the head isn't the one commented on"
         return self._enqueue(Job(action, number, sha, user, inventory, delivery, pinned=True))
+
+    @staticmethod
+    def _comment_key(kind: str, where, cid: int) -> str:
+        return f"{kind}:{where}:{cid}"
+
+    def _once(self, key: str, dispatch) -> tuple[int, str]:
+        """A comment triggers at most one job, whatever delivery id or bytes it arrives with (#37): a
+        replay re-encoded under a fresh delivery id gets past the delivery dedupe, not this one."""
+        if not self.state.first_sight([key], self.clock()):
+            return 200, "duplicate comment"
+        try:
+            status, text = dispatch()
+        except BaseException:  # not acted on (the code host failed mid-check): retryable
+            self.state.forget([key])
+            raise
+        if status >= 500:  # not acted on (queue full): the same comment may be retried
+            self.state.forget([key])
+        return status, text
 
     def _open_or_say(self, cr, action: str) -> bool:
         """Commands run on open PRs only (as Atlantis): a closed one never sends another close event,
