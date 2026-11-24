@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 from fakes import FakeRunner, ev_result, ev_stats, stats
-from test_github import FakeGitHub, R, pr as pr_json
+from test_github import FakeGitHub, R, gql_pr, merge_rules, pr as pr_json
 
 from ferry.locks import SQLiteLocks
 from ferry.service import Job, Service, Settings, make_handler, verify_signature
@@ -70,6 +70,12 @@ class World:
         g.routes[("GET", f"{R}/issues/1/comments")] = lambda q, d: (200, self.comments)
         g.routes[("POST", f"{R}/issues/1/comments")] = self._post
         g.routes[("GET", f"{R}/pulls/1/reviews")] = lambda q, d: (200, self.reviews)
+        # A ruleset needs one approval; GitHub's review decision follows the reviews.
+        merge_rules(g, lambda: gql_pr(sha=self.sha, decision="APPROVED" if any(
+                        r["state"] == "APPROVED" and r["commit_id"] == self.sha for r in self.reviews)
+                        else "REVIEW_REQUIRED", merge_state="CLEAN"),
+                    rules=[{"type": "pull_request", "ruleset_id": 1,
+                            "parameters": {"required_approving_review_count": 1}}])
         for u in ("james", "pip", "mallory"):
             g.routes[("GET", f"{R}/collaborators/{u}/permission")] = (
                 lambda q, d, u=u: (200, {"role_name": "write" if u in self.writers else "read"}))
@@ -170,6 +176,24 @@ def test_comment_parsing(world):
     assert world.svc.jobs.get().inventory == "homelab"
 
 
+def test_apply_from_a_non_writer_is_refused_before_any_job(world):
+    calls = []
+    world.svc.runner_factory = lambda *a: calls.append(a)
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply", user="mallory"))[1] == \
+        "apply refused: no write access"
+    assert world.svc.jobs.empty() and not calls  # no checkout, no credentials, no runner
+    assert "needs write access" in world.comments[-1]["body"]
+
+
+def test_queue_is_bounded(world):
+    world.svc.settings.max_queued_jobs = 2
+    world.svc.__post_init__()
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[0] == 202
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[0] == 202
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan")) == (503, "queue full, try again later")
+    assert world.svc.jobs.qsize() == 2
+
+
 # ---- jobs end to end -----------------------------------------------------------------------------
 
 
@@ -245,6 +269,9 @@ def test_http_endpoints(world):
         with urllib.request.urlopen(f"{base}/healthz") as resp:
             health = json.loads(resp.read())
             assert health["ok"] and health["queued"] == 1
+        world.svc.last_job = {"job": "plan", "pr": 1, "ok": False, "error": "git fetch https://internal.example/x failed"}
+        with urllib.request.urlopen(f"{base}/healthz") as resp:
+            assert "error" not in json.loads(resp.read())["last_job"]  # unauthenticated: no error text
         bad = urllib.request.Request(f"{base}/webhook", data=body, method="POST",
                                      headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": "sha256=0"})
         with pytest.raises(urllib.error.HTTPError) as e:
@@ -252,3 +279,11 @@ def test_http_endpoints(world):
         assert e.value.code == 401
     finally:
         httpd.shutdown()
+
+
+def test_job_credentials_are_redacted(world, repo):
+    # The OpenBao token lives only in the per-job env, not os.environ.
+    from ferry import config as config_mod
+    cfg = config_mod.load(repo / "ferry.yaml")
+    red = world.svc._redactor(cfg, {"VAULT_TOKEN": "s.jobtoken-abcdef123456"})
+    assert "s.jobtoken-abcdef123456" not in red.text("debug: s.jobtoken-abcdef123456")

@@ -135,6 +135,9 @@ class GitLabBackend:
             web_url=mr.get("web_url", ""),
         )
 
+    def merge_rule_blockers(self, cr: ChangeRequest) -> list[str]:
+        return []  # GitLab's detailed_merge_status already reports its rules in blocked_reasons
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for d in self.client.paged(f"{self._p}/merge_requests/{cr_id}/diffs"):

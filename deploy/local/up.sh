@@ -16,8 +16,8 @@ BAO_IMAGE=${BAO_IMAGE:-openbao/openbao:2.7.2}
 say() { printf '\n==> %s\n' "$*"; }
 
 "$HERE/down.sh" >/dev/null 2>&1 || true
-rm -rf "$LAB" && mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src}
-chmod 777 "$LAB"/{ca,jwt,secrets,state}
+rm -rf "$LAB" && mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src,work,run}
+chmod 777 "$LAB"/{ca,jwt,secrets,state,work,run}
 
 say "Building images (ferry:lab, ferry-target:lab)"
 docker build -q -t ferry:lab "$ROOT" >/dev/null
@@ -31,7 +31,7 @@ docker run -d --name ferry-lab-bao --network "$NET" -p 18200:8200 --cap-add IPC_
 bao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=lab ferry-lab-bao bao "$@"; }
 for _ in $(seq 1 30); do bao status >/dev/null 2>&1 && break; sleep 1; done
 
-# = atomic-terraform openbao/ssh.tf (#230): mount, CA, role "ferry", policy ssh-sign-ferry.
+# = what production OpenBao config sets up: mount, CA, role "ferry", policy ssh-sign-ferry.
 bao secrets enable -path=ssh-client-signer ssh >/dev/null
 bao write ssh-client-signer/config/ca generate_signing_key=true key_type=ed25519 >/dev/null
 bao write ssh-client-signer/roles/ferry - >/dev/null <<'JSON'
@@ -110,7 +110,7 @@ YAML
   git rev-parse HEAD > "$LAB/pr_head"
 )
 
-say "Fake GitHub API, the managed host, the ferry service"
+say "Fake GitHub API, the managed host, the executor, the ferry service"
 run_py -c "
 from cryptography.hazmat.primitives.asymmetric import rsa; from cryptography.hazmat.primitives import serialization
 k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -121,8 +121,18 @@ chmod 644 "$LAB/secrets/"*
 docker run -d --name ferry-lab-github --network "$NET" -p 18999:8080 -v "$LAB:/lab:ro" -v "$HERE:/lab-tools:ro" \
   -e LAB_HEAD_FILE=/lab/pr_head --entrypoint python ferry:lab /lab-tools/fakegh.py >/dev/null
 docker run -d --name ferry-lab-target --network "$NET" -v "$LAB/ca:/lab/ca:ro" ferry-target:lab >/dev/null
-docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 \
+# The playbooks run here: user ferry-run, none of the service's secrets mounted, the work dir
+# read-only. It refuses to start if it can read any of the paths in FERRY_EXECUTOR_MUST_NOT_READ.
+docker run -d --name ferry-lab-executor --network "$NET" -u 10002 \
+  -v "$LAB/work:/var/lib/ferry/work:ro" -v "$LAB/run:/run/ferry" \
+  -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
+  -e FERRY_EXECUTOR_MUST_NOT_READ=/secrets/app.pem:/secrets/webhook-secret:/jwt/nomad_openbao.jwt:/var/lib/ferry/state/locks.db \
+  ferry:lab executor >/dev/null
+# Rootless Docker/Podman shows the host's files as another owner; let git read the lab's remote.
+printf '[safe]\n\tdirectory = *\n' > "$LAB/gitconfig"
+docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 -v "$LAB/gitconfig:/etc/gitconfig:ro" \
   -v "$LAB/secrets:/secrets:ro" -v "$LAB/jwt:/jwt:ro" -v "$LAB/remote:/remote:ro" -v "$LAB/state:/var/lib/ferry/state" \
+  -v "$LAB/work:/var/lib/ferry/work" -v "$LAB/run:/run/ferry" -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
   -e FERRY_GITHUB_REPO=acme/ansible -e FERRY_GITHUB_APP_ID=1 -e FERRY_GITHUB_APP_KEY_FILE=/secrets/app.pem \
   -e FERRY_WEBHOOK_SECRET_FILE=/secrets/webhook-secret \
   -e GITHUB_API_URL=http://ferry-lab-github:8080 -e FERRY_GITHUB_GIT_URL=file:///remote \
