@@ -506,7 +506,9 @@ The tree must be clean (including untracked files) and HEAD reachable from an or
 fetching. The CLI generates a throwaway ed25519 key, renews its service lease, uses a private SSH
 ControlPath, and finishes and deletes its credential directory on exit, SIGINT or SIGTERM.
 SIGKILL cannot run cleanup: the service expires its lease. A failed renewal terminates Ansible.
-Use HTTPS and pin SSH host keys; `--insecure-http` disables both checks **only for the throwaway lab**.
+Use HTTPS and pin SSH host keys. For the throwaway lab only, `--insecure-http` allows plain HTTP to
+the service and `--no-host-key-checking` turns off SSH host-key checking; they are separate flags, and
+one never implies the other.
 
 The API is off unless **both** `FERRY_RUN_OIDC_ISSUER` and `FERRY_RUN_OIDC_AUDIENCE` are configured.
 The issuer is OpenBao's identity issuer (for example `https://bao.example.com/v1/identity/oidc`),

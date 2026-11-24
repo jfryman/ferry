@@ -107,3 +107,49 @@ def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch,
         assert out.out.count('[REDACTED]') == 2
     assert requests[0]['playbook'] == 'site.yml'
     assert requests[-1]['ok'] == (exit_code == 0)
+
+
+def run_operator(tmp_path, monkeypatch, body, **overrides):
+    """Run operator.run against a fake service and a fake ansible-playbook (a Python body)."""
+    import json
+    import time
+    from types import SimpleNamespace
+    import ferry.operator as operator
+    repo = repository(tmp_path)
+    (repo/'ferry.yaml').write_text('inventories:\n  - name: demo\n    path: inventory\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'config')
+    git(repo, 'push', 'origin', 'HEAD')
+    binary = tmp_path/'bin'
+    binary.mkdir()
+    executable = binary/'ansible-playbook'
+    executable.write_text('#!/usr/bin/env python3\nimport os, sys\n' + body)
+    executable.chmod(0o755)
+    monkeypatch.setenv('PATH', str(binary)+':'+__import__('os').environ['PATH'])
+    monkeypatch.setattr(operator, 'ferry_ansible_env', lambda *args: {})
+    requests = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, *args):
+            return json.dumps(dict(run_id='a'*32, certificate='cert-test-only', vault_password='',
+                lease_expires_at=time.time()+300, inventory_path='inventory')).encode()
+    class Opener:
+        def open(self, request, **kw):
+            requests.append(json.loads(request.data))
+            return Response()
+    monkeypatch.setattr(operator.urllib.request, 'build_opener', lambda *args: Opener())
+    args = dict(repo=repo, service='http://localhost:18080', insecure_http=False, no_host_key_checking=False,
+                playbook='site.yml', token_command='printf identity-test', inventory='demo', limit=None,
+                apply=False, reason=None)
+    args.update(overrides)
+    return operator.run(SimpleNamespace(**args)), requests
+
+
+@pytest.mark.parametrize('insecure_http,no_hkc,expected', [
+    (False, False, 'True'), (True, False, 'True'), (False, True, 'False'), (True, True, 'False')])
+def test_host_key_checking_is_its_own_flag(tmp_path, monkeypatch, capsys, insecure_http, no_hkc, expected):
+    rc, _ = run_operator(tmp_path, monkeypatch, 'print("HKC=" + os.environ["ANSIBLE_HOST_KEY_CHECKING"])\n',
+                         insecure_http=insecure_http, no_host_key_checking=no_hkc)
+    assert rc == 0
+    assert f'HKC={expected}' in capsys.readouterr().out

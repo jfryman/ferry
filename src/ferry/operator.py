@@ -143,7 +143,7 @@ def run(args):
                 env.update(HOME=str(tmp), ANSIBLE_PRIVATE_KEY_FILE=str(key),
                     ANSIBLE_SSH_CONTROL_PATH_DIR=str(tmp / 'cp'),
                     ANSIBLE_SSH_ARGS='-o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=30s',
-                    ANSIBLE_HOST_KEY_CHECKING='False' if args.insecure_http else 'True')
+                    ANSIBLE_HOST_KEY_CHECKING='False' if getattr(args, 'no_host_key_checking', False) else 'True')
                 if result.get('ssh_user'):
                     env['ANSIBLE_REMOTE_USER'] = result['ssh_user']
                 if result['vault_password']:

@@ -13,5 +13,5 @@ mkdir -m 700 "$HOME"
 git clone -q --branch "${LAB_BRANCH:-feature}" file:///remote/acme/ansible.git "$HOME/repo"
 cd "$HOME/repo"
 # OpenBao 2.7 identity token generation is a GET (bao read), not bao write.
-exec ferry run -i lab --service http://ferry-lab-ferry:8080 --insecure-http \
+exec ferry run -i lab --service http://ferry-lab-ferry:8080 --insecure-http --no-host-key-checking \
   --token-command 'bao read -field=token identity/oidc/token/ferry' "$@"
