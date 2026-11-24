@@ -86,10 +86,11 @@ class World:
     def mr_json(self):
         return {"iid": 1, "sha": self.sha, "source_branch": "feature", "target_branch": self.target,
                 "author": {"username": self.author}, "state": "closed" if self.closed else "opened", "draft": False,
-                "detailed_merge_status": self.merge_status, "web_url": "https://gitlab.example.com/acme/ansible/-/merge_requests/1"}
+                "detailed_merge_status": self.merge_status, "diverged_commits_count": self.behind, "web_url": "https://gitlab.example.com/acme/ansible/-/merge_requests/1"}
 
     author = "bob"
     target = "main"  # MR 1's target branch, as the API says
+    behind = 0  # diverged_commits_count
     closed = False  # what the API says about MR 1
 
     def _runner(self, checkout, marker, env):
@@ -606,3 +607,31 @@ def test_an_mr_retargeted_after_its_plan_is_not_applied(world, monkeypatch):
 def count_credentials_gl(monkeypatch):
     from test_service import count_credentials
     return count_credentials(monkeypatch)
+
+
+# ---- #23: up to date with the target ----------------------------------------------------------------
+
+def test_an_mr_behind_main_is_planned_with_a_warning_and_its_apply_refused(world, monkeypatch):
+    from test_service import count_credentials
+    world.behind = 1
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert "1 commit(s) behind `main`" in world.notes[-1]["body"]
+    minted = count_credentials(monkeypatch)
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    result, reasons = apply_reasons(world, "b1")
+    assert not result["ok"] and not minted and any("rebase or merge `main`" in r for r in reasons)
+    world.behind = 0
+    result, _ = apply_reasons(world, "b2")
+    assert result["ok"] and len(minted) == 1
+
+
+def test_main_moving_after_the_plan_refuses_the_mr_apply(world, monkeypatch):
+    from test_service import count_credentials
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    world.behind = 3
+    minted = count_credentials(monkeypatch)
+    result, reasons = apply_reasons(world, "b3")
+    assert not result["ok"] and not minted and any("3 commit(s) behind" in r for r in reasons)

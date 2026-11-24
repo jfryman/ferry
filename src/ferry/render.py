@@ -93,8 +93,11 @@ def _scope_block(scope: Scope, red: Redactor) -> str:
 def plan_comment(
     inventory: str, sha: str, scope: Scope, run: RunResult | None, meta: dict, red: Redactor,
     max_chars: int, job_url: str = "", apply_how: str = "run the manual `ferry:apply` job in this MR's pipeline",
+    warnings: list[str] | tuple[str, ...] = (),
 ) -> str:
     head = f"### ferry plan: `{inventory}` @ `{sha[:8]}`"
+    for w in warnings:
+        head += f"\n\n> ⚠️ {red.text(w)}"
     if run is None:
         body = "Nothing to plan: no host is affected by this change."
     else:

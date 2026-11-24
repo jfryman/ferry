@@ -92,6 +92,22 @@ class Engine:
         return (f"this MR targets `{cr.target_branch}`; ferry only handles MRs into {names} "
                 "(the default branch, plus `base_branches` in the default branch's ferry.yaml)")
 
+    def divergence(self, cr) -> tuple[int | None, str | None]:
+        """(commits behind the base, reason to refuse apply). Unknown counts refuse: fail closed."""
+        if not self.cfg.apply.require_up_to_date:
+            return 0, None
+        try:
+            behind = self.vcs.behind_by(cr)
+        except Exception as e:
+            status = getattr(e, "status", None)
+            return None, (f"ferry couldn't tell whether this MR is up to date with `{cr.target_branch}` "
+                          f"({type(e).__name__}" + (f", HTTP {status}" if status else "") + "); try again")
+        if behind > 0:
+            return behind, (f"this MR is {behind} commit(s) behind `{cr.target_branch}`: rebase or merge "
+                            f"`{cr.target_branch}` into it, then re-run the plan (applying it would put back "
+                            "what those commits changed)")
+        return 0, None
+
     def _lock_conflict(self, inventory: str, cr_id: int, sha: str, user: str) -> str | None:
         """Take (or confirm) the inventory lock for cr_id. Returns a reason string on conflict."""
         if self.locks is None:
@@ -154,6 +170,8 @@ class Engine:
             return self._refuse("plan", cr_id, inv.name, sha, ["policy check failed:"] + violations)
         files = self.vcs.changed_files(cr_id)
         sc = self.scope_for(files, inv.name)
+        behind, behind_why = self.divergence(cr)
+        warnings = [behind_why + "; ferry will refuse to apply it until then"] if behind_why else []
         meta = {
             "v": 1,
             "inventory": inv.name,
@@ -167,7 +185,7 @@ class Engine:
         if sc.empty:
             meta["clean"] = True
             body = render.plan_comment(inv.name, sha, sc, None, meta, self.red, self.cfg.max_comment_chars, self.job_url,
-                                       **self._apply_how())
+                                       warnings=warnings, **self._apply_how())
             self._post(cr_id, body)
             return Outcome(True, "plan", note_body=body, extra=meta)
         conflict = self._lock_conflict(inv.name, cr_id, sha, user)
@@ -177,7 +195,7 @@ class Engine:
         meta["clean"] = run.clean
         meta["counts"] = run.counts()
         body = render.plan_comment(inv.name, sha, sc, run, meta, self.red, self.cfg.max_comment_chars, self.job_url,
-                                   **self._apply_how())
+                                   warnings=warnings, **self._apply_how())
         self._post(cr_id, body)
         return Outcome(run.clean, "plan", run=run, note_body=body, extra=meta)
 
@@ -205,6 +223,9 @@ class Engine:
         # already refused above.
         if cr.open and cr.head_sha == sha:
             reasons.extend(self.vcs.merge_rule_blockers(cr))
+            _, behind_why = self.divergence(cr)  # live: the base may have moved since the plan
+            if behind_why:
+                reasons.append(behind_why)
         # An approval counts only from someone who could apply it themselves: on a public GitHub repo
         # anyone can leave an approving review, and the code host's own rules may not require more.
         # ferry's own account never counts (a job that got hold of its credentials could approve).

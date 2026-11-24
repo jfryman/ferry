@@ -726,3 +726,45 @@ def test_a_pr_cannot_allow_its_own_base(repo, tmp_path):
 def test_a_pr_whose_head_repo_was_deleted_is_not_planned(world):
     status, text = world.deliver("pull_request", world.pr_event(head_repo=None))
     assert status == 202 and "fork" in text and world.svc.jobs.empty()
+
+
+# ---- #23: up to date with the base ------------------------------------------------------------------
+
+def test_a_pr_behind_main_is_planned_with_a_warning_and_its_apply_refused(world, monkeypatch):
+    world.gh.behind_by = 1
+    world.deliver("pull_request", world.pr_event())
+    [plan] = world.drain()
+    assert "1 commit(s) behind `main`" in world.comments[-1]["body"]
+    minted = count_credentials(monkeypatch)
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and not minted and len(world.runner.requests) == 1
+    assert any("rebase or merge `main`" in r for r in refused["inventories"]["homelab"]["reasons"])
+    world.gh.behind_by = 0  # rebased (same head here; the fake only answers the count)
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [applied] = world.drain()
+    assert applied["ok"] and len(minted) == 1
+
+
+def test_main_moving_after_the_plan_refuses_the_apply(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.gh.behind_by = 2  # another PR merged to main
+    minted = count_credentials(monkeypatch)
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and not minted
+
+
+def test_a_compare_api_error_refuses_the_apply(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.gh.routes[("GET", f"{R}/compare/main...{world.sha}")] = lambda q, d: (502, {"message": "x"})
+    minted = count_credentials(monkeypatch)
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and not minted
+    assert any("couldn't tell" in r for r in refused["inventories"]["homelab"]["reasons"])

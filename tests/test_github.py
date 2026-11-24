@@ -18,6 +18,7 @@ class FakeGitHub:
         self.calls = []
         self.routes = {}
         self.tokens_seen = []
+        self.behind_by = 0  # what /compare/BASE...HEAD answers when no route is set (#23)
 
     def __call__(self, method, url, headers, body):
         assert headers["Accept"] == "application/vnd.github+json"
@@ -28,6 +29,8 @@ class FakeGitHub:
         data = json.loads(body) if body else None
         self.calls.append((method, path, parse_qs(parsed.query), data))
         handler = self.routes.get((method, path))
+        if handler is None and method == "GET" and "/compare/" in path:
+            handler = {"status": "behind" if self.behind_by else "ahead", "behind_by": self.behind_by, "ahead_by": 1}
         if handler is None:
             return 404, b'{"message":"Not Found"}'
         status, obj = handler(parse_qs(parsed.query), data) if callable(handler) else (200, handler)
@@ -354,3 +357,20 @@ def test_lock_holder_lookup_errors_through_the_real_client(repo, tmp_path, statu
     assert out.ok is taken
     assert locks.get("homelab").holder == (1 if taken else 2)
     assert bool(runner.requests) is taken
+
+
+def test_behind_by_uses_the_compare_api(gh_backend=None):
+    from ferry.vcs.base import ChangeRequest
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="b[bot]")
+    fake.routes[("GET", f"{R}/compare/main...{'a' * 40}")] = {"status": "diverged", "behind_by": 3, "ahead_by": 1}
+    cr = ChangeRequest(1, "a" * 40, "feature", "main", "pip", "opened")
+    assert be.behind_by(cr) == 3
+    fake.routes[("GET", f"{R}/compare/main...{'a' * 40}")] = {"status": "ahead", "behind_by": 0, "ahead_by": 1}
+    assert be.behind_by(cr) == 0
+    fake.routes[("GET", f"{R}/compare/main...{'a' * 40}")] = lambda q, d: (500, {"message": "x"})
+    with pytest.raises(GitHubError):
+        be.behind_by(cr)
+    fake.routes[("GET", f"{R}/compare/main...{'a' * 40}")] = {"status": "ahead"}  # no behind_by: unknown
+    with pytest.raises(ValueError):
+        be.behind_by(cr)

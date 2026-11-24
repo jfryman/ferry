@@ -138,6 +138,17 @@ class GitLabBackend:
     def merge_rule_blockers(self, cr: ChangeRequest) -> list[str]:
         return []  # GitLab's detailed_merge_status already reports its rules in blocked_reasons
 
+    def behind_by(self, cr: ChangeRequest) -> int:
+        """GitLab's diverged_commits_count: commits on the target branch the MR doesn't have."""
+        mr = self.client.request("GET", f"{self._p}/merge_requests/{cr.id}",
+                                 {"include_diverged_commits_count": "true"}) or {}
+        n = mr.get("diverged_commits_count")
+        if not isinstance(n, int):
+            raise ValueError("GitLab didn't report diverged_commits_count for the MR")
+        if mr.get("sha") != cr.head_sha:
+            raise ValueError("the MR head moved while ferry was checking")
+        return n
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for d in self.client.paged(f"{self._p}/merge_requests/{cr_id}/diffs"):

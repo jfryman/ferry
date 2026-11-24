@@ -20,6 +20,7 @@ class FakeVCS:
         self.commit_mrs: dict[str, list[int]] = {}
         self.rule_blockers: dict[int, list[str]] = {}
         self.lookup_errors: dict[int, Exception] = {}  # get_change_request(id) raises this
+        self.behind: dict[int, int | Exception] = {}  # commits the base has that the PR doesn't
         self._next = 1
 
     def add_cr(self, cr_id, sha="a" * 40, author="pip", files=None, **kw):
@@ -39,6 +40,12 @@ class FakeVCS:
 
     def merge_rule_blockers(self, cr):
         return list(self.rule_blockers.get(cr.id, []))
+
+    def behind_by(self, cr):
+        v = self.behind.get(cr.id, 0)
+        if isinstance(v, Exception):
+            raise v
+        return v
 
     def changed_files(self, cr_id):
         return list(self.files[cr_id])

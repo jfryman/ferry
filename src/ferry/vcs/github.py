@@ -245,6 +245,15 @@ class GitHubBackend:
                     f"(HTTP {e.status}): the App needs **{PERMISSION_FOR[what]}**; refusing until it can")
         return f"ferry can't read GitHub's merge rules (HTTP {e.status}); refusing rather than guessing"
 
+    def behind_by(self, cr: ChangeRequest) -> int:
+        """Commits on the base the head doesn't have: the compare API's behind_by (base...head)."""
+        out = self.client.request(
+            "GET", f"{self._r}/compare/{urllib.parse.quote(cr.target_branch, safe='')}...{cr.head_sha}") or {}
+        behind = out.get("behind_by")
+        if not isinstance(behind, int):
+            raise ValueError("GitHub's compare API didn't say how far behind the PR is")
+        return behind
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for f in self.client.paged(f"{self._r}/pulls/{cr_id}/files"):
