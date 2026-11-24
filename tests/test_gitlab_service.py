@@ -101,12 +101,12 @@ class World:
         self._n = getattr(self, "_n", 0) + 1
         return self.svc.handle(event, delivery or f"uuid-{self._n}", token, json.dumps(payload).encode())
 
-    def mr_event(self, action="open", draft=False, fork=False, oldrev=None, changes=None, project=None):
+    def mr_event(self, action="open", draft=False, fork=False, oldrev=None, changes=None, project=None, user="bob"):
         attrs = {"iid": 1, "action": action, "draft": draft, "source_project_id": 7 if fork else 9,
                  "target_project_id": 9, "last_commit": {"id": self.sha}, "author_id": 2}
         if oldrev:
             attrs["oldrev"] = oldrev
-        return {"object_kind": "merge_request", "user": {"username": "someone"},
+        return {"object_kind": "merge_request", "user": {"username": user},
                 "project": project or {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": attrs, "changes": changes or {}}
 
@@ -184,6 +184,34 @@ def test_plan_rule_waits_for_a_developer(world):
     assert world.deliver("Note Hook", world.note_event("/ferry plan", user="alice"))[1] == "plan queued"
     job = world.svc.jobs.get()
     assert (job.action, job.pr, job.sha, job.user) == ("plan", 1, world.sha, "alice")
+
+
+def test_push_by_a_non_developer_waits(world):
+    # bob (a Developer) authored the MR; mallory pushed into it: her code, so the plan rule is hers.
+    assert world.deliver("Merge Request Hook", world.mr_event("update", oldrev="a" * 40, user="mallory"))[1] == \
+        "waiting for /ferry plan"
+    assert world.svc.jobs.empty() and "pushes from users" in world.notes[-1]["body"]
+    assert world.deliver("Merge Request Hook", world.mr_event("update", oldrev="a" * 40, user="alice"))[1] == \
+        "plan queued"
+
+
+def test_apply_from_a_non_developer_is_refused_before_any_job(world):
+    calls = []
+    world.svc.runner_factory = lambda *a: calls.append(a)
+    assert world.deliver("Note Hook", world.note_event("/ferry apply", user="mallory"))[1] == \
+        "apply refused: no Developer access"
+    assert world.svc.jobs.empty() and not calls  # no checkout, no credentials, no runner
+    assert "needs Developer access" in world.notes[-1]["body"]
+
+
+def test_queue_is_bounded(world):
+    world.svc.settings.max_queued_jobs = 2
+    world.svc.__post_init__()
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[0] == 202
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[0] == 202
+    assert world.deliver("Note Hook", world.note_event("/ferry plan")) == (503, "queue full, try again later")
+    assert world.deliver("Merge Request Hook", world.mr_event("close"))[0] == 503
+    assert world.svc.jobs.qsize() == 2
 
 
 def test_note_parsing(world):
@@ -320,3 +348,32 @@ def test_build_gitlab_service_from_env(tmp_path, monkeypatch):
     assert svc.workspace.remote == "https://gitlab.example.com/acme/ansible.git"
     assert svc.workspace.git_user == "oauth2" and svc.workspace._tok() == "tok"
     assert svc.vcs.pipeline_blocks and fake.calls[0][1] == f"{API}/projects/acme%2Fansible"
+
+
+def test_serve_startup_retries_while_the_code_host_is_unreachable(monkeypatch):
+    import urllib.error
+
+    from ferry import cli
+    from ferry.vcs.gitlab import GitLabError
+
+    calls, waits = [], []
+
+    def flaky(vcs=None):
+        calls.append(vcs)
+        if len(calls) < 3:
+            raise urllib.error.URLError("Temporary failure in name resolution")
+        return "svc"
+
+    monkeypatch.setattr(cli, "build_service", flaky)
+    assert cli.build_service_with_retry(attempts=5, sleep=waits.append) == "svc"
+    assert len(calls) == 3 and waits == [1.0, 2.0]
+
+    def unauthorized(vcs=None):  # a wrong token is not transient: fail at once
+        calls.append(vcs)
+        raise GitLabError(401, "GET", "/user", "unauthorized")
+
+    calls.clear()
+    monkeypatch.setattr(cli, "build_service", unauthorized)
+    with pytest.raises(GitLabError):
+        cli.build_service_with_retry(attempts=5, sleep=waits.append)
+    assert len(calls) == 1

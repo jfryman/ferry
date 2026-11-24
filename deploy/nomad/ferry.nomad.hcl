@@ -35,7 +35,7 @@ job "ferry" {
       driver = "docker"
 
       config {
-        image = "ghcr.io/jfryman/ferry:0.2.0"
+        image = "ghcr.io/jfryman/ferry:v0.2.0"
         ports = ["http"]
       }
       user = "10001"
@@ -102,7 +102,7 @@ job "ferry" {
       }
 
       config {
-        image   = "ghcr.io/jfryman/ferry:0.2.0"
+        image   = "ghcr.io/jfryman/ferry:v0.2.0"
         command = "executor"
       }
 
@@ -111,7 +111,7 @@ job "ferry" {
         FERRY_EXECUTOR_SOCKET        = "${NOMAD_ALLOC_DIR}/run/executor.sock"
         # Refuse to start if the separation is broken.
         FERRY_EXECUTOR_MUST_NOT_READ = "/var/lib/ferry/state/locks.db"
-        ANSIBLE_HOST_KEY_CHECKING    = "True" # and mount your known_hosts at /etc/ssh/ssh_known_hosts
+        ANSIBLE_HOST_KEY_CHECKING    = "True" # the image default; mount your known_hosts at /etc/ssh/ssh_known_hosts
       }
 
       resources {

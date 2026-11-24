@@ -96,7 +96,7 @@ censors them before callbacks; ferry also drops their diff/msg), diffs of sensit
 Vault/GitLab/Slack/AWS tokens, crypt hashes and `password=...`. The contract is still: put `no_log`
 on any task that handles a secret.
 
-## Threat model (read before reusing at work)
+## Threat model
 
 A plan runs the MR's code with the inventory's SSH credentials. Check mode limits what tasks do,
 but `check_mode: false`, controller-side lookups and custom plugins all run for real. `ferry policy`
@@ -130,8 +130,12 @@ sequenceDiagram
   default branch; only the playbooks come from the PR.
 - **Plan rule.** A plan runs the PR's playbooks with root SSH access (check mode, but
   `check_mode: false`, lookups and plugins run for real), so ferry plans automatically only for
-  authors with write access. Anyone else's PR waits for `/ferry plan` from someone with write
-  access. Drafts and fork PRs aren't planned.
+  authors with write access, and for pushes from users with write access. Anyone else's PR (or
+  push into a PR) waits for `/ferry plan` from someone with write access. Drafts and fork PRs
+  aren't planned.
+- **Host keys are checked** (the image sets `ANSIBLE_HOST_KEY_CHECKING=True`). Mount known_hosts at
+  `/etc/ssh/ssh_known_hosts` in the container that runs the playbooks: pinned keys, or
+  `@cert-authority` lines for OpenBao-signed host certificates.
 - **Apply** is `/ferry apply [inventory]` and passes every gate above, against live GitHub state.
 - **Per-job credentials** (optional, `FERRY_OPENBAO_*`): an OpenBao token from the service's
   workload identity, a throwaway ed25519 key signed by OpenBao's SSH CA, and the ansible-vault
