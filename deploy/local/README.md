@@ -210,3 +210,11 @@ A successful response includes `run_id`, `certificate`, `vault_password`, `lease
 The same subject renews at `POST /api/runs/{run_id}/lease` and releases at
 `POST /api/runs/{run_id}/finish` with `{ok, counts, changed_hosts}`. Never print the response's
 credentials into shared logs. A held inventory returns 409, a valid but denied subject 403.
+
+### Readable operator identities
+The demo identity role emits `name` from `identity.entity.name`. Authorization remains on
+its stable entity UUID (`sub`), not this claim. `lab.sh locks` shows
+`run:<id> (lab-demo; sub=<uuid>)`; `GET /jobs` records both `subject` and
+`display_name: lab-demo`. Production can select another signed display claim with
+`FERRY_RUN_NAME_CLAIM`; names are sanitized/bounded and never used as metric labels.
+CLI check/apply is chosen by the client, so disabling applies refuses both CLI modes.
