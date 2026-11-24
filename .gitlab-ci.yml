@@ -15,7 +15,9 @@ workflow:
 .py:
   stage: test
   before_script:
-    - pip install --quiet --disable-pip-version-check 'ansible-core~=2.20.0' 'pytest>=8' -e .
+    # git and ssh-keygen: the service, workspace and credential tests use the real tools.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git openssh-client >/dev/null
+    - pip install --quiet --disable-pip-version-check 'ansible-core~=2.20.0' -e '.[test]'
 
 test:py3.12:
   extends: .py
