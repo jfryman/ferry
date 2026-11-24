@@ -337,6 +337,16 @@ would then need the right to create pods or submit jobs, which is a bigger grant
 protects. In the local lab, `deploy/local/lab.sh evil` and then `leakcheck` run a hostile plan and
 show what it got.
 
+
+The change's `requirements.yml` is installed there too: the service asks the executor, which runs
+`ansible-galaxy collection install` into its own writable cache (`FERRY_EXECUTOR_COLLECTIONS`) with
+a minimal environment (no `FERRY_*`, no tokens, a throwaway `HOME`) and a hard timeout
+(`FERRY_GALAXY_TIMEOUT_SECONDS`, default 300, kills everything it started). `FERRY_GALAXY=skip`
+never reads `requirements.yml` (images that ship their collections). `FERRY_GALAXY_SERVER` pins
+the Galaxy server and refuses requirements that name URLs, git, files or another `source:`. Cache
+entries unused for `FERRY_COLLECTIONS_MAX_AGE_DAYS` (14) are pruned. Git fetches have a timeout too
+(`FERRY_GIT_TIMEOUT_SECONDS`, 300). Without an executor, the same install runs in the service with
+the same minimal environment.
 ## GitHub
 
 `--vcs github` (or `FERRY_VCS=github`) uses `ferry.vcs.github.GitHubBackend` and `SQLiteLocks`:

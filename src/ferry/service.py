@@ -63,6 +63,7 @@ from .metrics import Metrics, reject_reason
 from .state import MemoryState
 from .vcs.github import GitHubBackend
 from .webhook import COMMAND_RE
+from .galaxy import collections_path as galaxy_path
 from .workspace import CheckoutError, Workspace
 
 log = logging.getLogger("ferry.service")
@@ -168,6 +169,13 @@ class Settings:
     max_body_bytes: int = 1024 * 1024
     request_timeout_seconds: float = 15.0
     max_connections: int = 32
+    # ansible-galaxy on the change's requirements.yml (#26): "install" or "skip" (images that ship
+    # their collections; requirements.yml is then never read). Runs in the executor when there is one.
+    galaxy: str = "install"
+    galaxy_server: str | None = None  # pin the Galaxy server; requirements naming other sources fail
+    galaxy_timeout_seconds: float = 300.0
+    collections_max_age_days: float = 14.0
+    executor_socket: str | None = None
 
 
 @dataclass
@@ -524,7 +532,7 @@ class Service:
             raise NotHandled(why.replace("MR", self.noun))
         checkout = self.workspace.pull_request(job.pr, job.sha)
         try:
-            env = self.workspace.collections(checkout)
+            env = self._collections(checkout)
             invs = [job.inventory] if job.inventory else [i.name for i in cfg.inventories]
             outcomes = {}
             if job.action == "apply":
@@ -550,10 +558,23 @@ class Service:
         finally:
             self.workspace.discard(checkout)
 
+    def _collections(self, checkout: Path) -> dict:
+        """The change's collections, installed on the executor's side when there is one (#26)."""
+        st = self.settings
+        if st.galaxy == "skip" or not (checkout / "requirements.yml").is_file():
+            return {}
+        if st.executor_socket:
+            from .executor import install_collections
+            path = install_collections(st.executor_socket, checkout, timeout=st.galaxy_timeout_seconds,
+                                       server=st.galaxy_server, max_age_days=st.collections_max_age_days)
+            return {"ANSIBLE_COLLECTIONS_PATH": galaxy_path(path)}
+        return self.workspace.collections(checkout, timeout=st.galaxy_timeout_seconds, server=st.galaxy_server,
+                                          max_age_days=st.collections_max_age_days)
+
     def _drift(self) -> dict:
         main_dir, sha = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")
-        env = self.workspace.collections(main_dir)
+        env = self._collections(main_dir)
         results = {}
         with job_credentials(self.bao, self.settings.ssh_user) as creds:
             job_env = {**env, **creds}

@@ -753,3 +753,16 @@ def test_an_approval_from_someone_who_never_pushed_still_applies(world):
     world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
     result, _ = apply_reasons(world, "c4")
     assert result["ok"]
+
+
+def test_gitlab_service_installs_collections_in_the_executor(world, monkeypatch, tmp_path):
+    from ferry import executor as executor_mod
+    world.svc.settings.executor_socket = "/run/ferry/executor.sock"
+    asked = []
+    monkeypatch.setattr(executor_mod, "install_collections", lambda sock, co, **kw: asked.append(co) or "/x")
+    co = tmp_path / "co"
+    co.mkdir()
+    (co / "requirements.yml").write_text("collections: [a.b]\n")
+    assert world.svc._collections(co)["ANSIBLE_COLLECTIONS_PATH"].startswith("/x") and asked == [co]
+    world.svc.settings.galaxy = "skip"
+    assert world.svc._collections(co) == {} and len(asked) == 1

@@ -146,6 +146,13 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
   FERRY_OPENBAO_VAULT_PASSWORD_PATH (kv-v2 data path) and _FIELD (password),
   FERRY_OPENBAO_SSH_TTL (e.g. 20m; default: the role's ttl), FERRY_OPENBAO_SSH_PRINCIPAL
   (valid_principals to request; default: the role's default_user)
+  FERRY_GALAXY                   install (default) or skip: ansible-galaxy on the change's
+                                 requirements.yml (in the executor when there is one); skip for
+                                 images that ship their collections (requirements.yml isn't read)
+  FERRY_GALAXY_SERVER            pin the Galaxy server; requirements naming any other source fail
+  FERRY_GALAXY_TIMEOUT_SECONDS   300 (default): kill ansible-galaxy (and what it started) after this
+  FERRY_COLLECTIONS_MAX_AGE_DAYS 14 (default): prune collection caches unused this long (0: never)
+  FERRY_GIT_TIMEOUT_SECONDS      300 (default): any one git fetch/checkout
   FERRY_JOB_TIMEOUT_MINUTES      kill a plan/apply/drift run after this long (0: no limit); keep it
                                  below the certificate TTL
   FERRY_EXECUTOR_SOCKET          run playbooks in `ferry executor` (a separate user/container that
@@ -245,7 +252,13 @@ def build_service(vcs: str | None = None):
     common = dict(ssh_user=_env("FERRY_SSH_USER"), drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
                   job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")),
                   max_event_age_minutes=float(_env("FERRY_WEBHOOK_MAX_AGE_MINUTES", "10")),
-                  max_body_bytes=int(_env("FERRY_MAX_BODY_BYTES", str(1024 * 1024))))
+                  max_body_bytes=int(_env("FERRY_MAX_BODY_BYTES", str(1024 * 1024))),
+                  galaxy=_env("FERRY_GALAXY", "install"), galaxy_server=_env("FERRY_GALAXY_SERVER"),
+                  galaxy_timeout_seconds=float(_env("FERRY_GALAXY_TIMEOUT_SECONDS", "300")),
+                  collections_max_age_days=float(_env("FERRY_COLLECTIONS_MAX_AGE_DAYS", "14")),
+                  executor_socket=_env("FERRY_EXECUTOR_SOCKET"))
+    if common["galaxy"] not in ("install", "skip"):
+        sys.exit("ferry serve: FERRY_GALAXY must be install or skip")
     workdir = _env("FERRY_WORKDIR", "/var/lib/ferry/work")
     if kind == "gitlab":
         return _build_gitlab_service(required, secret(), token, common, workdir)
@@ -269,7 +282,7 @@ def build_service(vcs: str | None = None):
         vcs=vcs,
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
         state=SQLiteState(required["FERRY_LOCK_DB"], job_history=int(_env("FERRY_JOB_HISTORY", "200"))),
-        workspace=Workspace(workdir, f"{git_url}/{repo}.git", tokens),
+        workspace=Workspace(workdir, f"{git_url}/{repo}.git", tokens, git_timeout=_git_timeout()),
         secret=secret().encode(),
         bao=_openbao(),
         **_runner_factory(),
@@ -296,11 +309,15 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
         state=SQLiteState(required["FERRY_LOCK_DB"], job_history=int(_env("FERRY_JOB_HISTORY", "200"))),
         workspace=Workspace(workdir, remote, token, change_ref="refs/merge-requests/{number}/head",
-                            git_user="oauth2"),
+                            git_user="oauth2", git_timeout=_git_timeout()),
         secret=secret.encode(),
         bao=_openbao(),
         **_runner_factory(),
     )
+
+
+def _git_timeout() -> float:
+    return float(_env("FERRY_GIT_TIMEOUT_SECONDS", "300"))
 
 
 def _runner_factory() -> dict:
@@ -323,6 +340,8 @@ socket's directory. Point the service at the same socket with FERRY_EXECUTOR_SOC
                                  (default /var/lib/ferry/work)
   FERRY_EXECUTOR_MUST_NOT_READ   colon-separated paths of service secrets; the executor refuses to
                                  start if it can read any of them (or if it runs as root)
+  FERRY_EXECUTOR_COLLECTIONS     writable cache for the changes' collections (ansible-galaxy runs
+                                 here, not in the service); default $TMPDIR/ferry-collections
 
 As its container's PID 1 it also kills every other process in the container after each job.
 """
@@ -341,7 +360,9 @@ def run_executor() -> int:
         sys.exit(f"ferry executor: not separated from the service: {'; '.join(problems)}")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # PID 1 has no default SIGTERM action
     Executor(sock, [_env("FERRY_WORKDIR", "/var/lib/ferry/work")],
-             ansible_playbook=_env("FERRY_EXECUTOR_ANSIBLE_PLAYBOOK", "ansible-playbook")).serve_forever()
+             ansible_playbook=_env("FERRY_EXECUTOR_ANSIBLE_PLAYBOOK", "ansible-playbook"),
+             galaxy=_env("FERRY_EXECUTOR_ANSIBLE_GALAXY", "ansible-galaxy"),
+             collections_root=_env("FERRY_EXECUTOR_COLLECTIONS")).serve_forever()
     return 0
 
 
