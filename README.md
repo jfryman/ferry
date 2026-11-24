@@ -73,6 +73,7 @@ against your own repository, start with [Drivers](docs/drivers.md).
 | [`ferry serve`](docs/serve.md) | Deploying the service: image, webhooks, comment commands, credentials, executor, endpoints |
 | [`ferry run`](docs/run.md) | Operator runs from a workstation: identity, authorization, leases, audit |
 | [Security model](docs/security.md) | Trust boundaries, threat model, the decisions behind them, known limits |
+| [Reporting a vulnerability](SECURITY.md) | How to report security problems privately, supported versions |
 | [Configuration reference](docs/configuration.md) | `ferry.yaml` keys, environment variables, CLI flags, HTTP endpoints |
 | [Operations](docs/operations.md) | Runbooks: freeze applies, stuck locks, backups, metrics, alerts, upgrades |
 | [Troubleshooting](docs/troubleshooting.md) | Refusal messages and what to do about them |
