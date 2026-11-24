@@ -257,7 +257,11 @@ def build_service(vcs: str | None = None):
     if missing:
         sys.exit(f"ferry serve: missing {', '.join(missing)}")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    common = dict(ssh_user=_env("FERRY_SSH_USER"), drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
+    common = dict(run_oidc_issuer=_env("FERRY_RUN_OIDC_ISSUER"),
+                  run_oidc_audience=_env("FERRY_RUN_OIDC_AUDIENCE"),
+                  run_allowed_subjects=tuple((_env("FERRY_RUN_ALLOWED_SUBJECTS") or "").split(",")),
+                  run_allowed_groups=tuple((_env("FERRY_RUN_ALLOWED_GROUPS") or "").split(",")),
+                  run_lease_seconds=float(_env("FERRY_RUN_LEASE_SECONDS", "300")), ssh_user=_env("FERRY_SSH_USER"), drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
                   job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")),
                   max_event_age_minutes=float(_env("FERRY_WEBHOOK_MAX_AGE_MINUTES", "10")),
                   max_body_bytes=int(_env("FERRY_MAX_BODY_BYTES", str(1024 * 1024))),
@@ -463,6 +467,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("files", nargs="+")
 
     sub.add_parser("policy")
+    s = sub.add_parser("run", help="run locally with a service-owned lock and per-run credentials")
+    s.add_argument("playbook")
+    s.add_argument("-i", "--inventory")
+    s.add_argument("--limit")
+    s.add_argument("--apply", action="store_true")
+    s.add_argument("--service", default=_env("FERRY_SERVICE_URL", "https://ferry.example.com"))
+    s.add_argument("--token-command", default=_env("FERRY_RUN_TOKEN_COMMAND",
+                   "bao read -field=token identity/oidc/token/ferry"))
+    s.add_argument("--insecure-http", action="store_true", help="throwaway lab only: HTTP and no host key checking")
 
     sub.add_parser("serve", help="webhook service (GitHub App or GitLab)", description=SERVE_HELP,
                    formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -475,6 +488,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--reason", help="shown on the PR when a command is refused")
 
     args = p.parse_args(argv)
+
+    if args.cmd == "run":
+        from .operator import run, OperatorError
+        try:
+            return run(args)
+        except OperatorError as e:
+            print(f"ferry run: {e}", file=sys.stderr)
+            return 1
 
     if args.cmd == "executor":
         return run_executor()
