@@ -47,6 +47,10 @@ BLOCKING_MERGE_STATUS = {
 # these block, as GitHub's required checks do (mergeable_state "blocked").
 PIPELINE_MERGE_STATUS = {"ci_must_pass", "ci_still_running"}
 
+# GitLab's own approval rules aren't met. The service blocks on this (approval_rules); the CI driver
+# keeps its behavior.
+APPROVAL_MERGE_STATUS = {"not_approved"}
+
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, bytes]]
 Token = str | Callable[[], str]
 
@@ -103,12 +107,17 @@ def _ts(value: str) -> datetime:
 
 class GitLabBackend:
     """pipeline_blocks: treat a pending or failed MR pipeline as a merge blocker (the service; see
-    PIPELINE_MERGE_STATUS). The CI driver leaves it off: its own job is part of that pipeline."""
+    PIPELINE_MERGE_STATUS). The CI driver leaves it off: its own job is part of that pipeline.
 
-    def __init__(self, client: GitLabClient, project: str | int, pipeline_blocks: bool = False):
+    approval_rules: apply also needs GitLab's own approval state to pass (approval rules, code
+    owners, approvals_left == 0), on top of ferry's min_approvals. See approval_rule_blockers."""
+
+    def __init__(self, client: GitLabClient, project: str | int, pipeline_blocks: bool = False,
+                 approval_rules: bool = False):
         self.client = client
         self.project = urllib.parse.quote(str(project), safe="")
         self.pipeline_blocks = pipeline_blocks
+        self.approval_rules = approval_rules
         self._bot: str | None = None
 
     @property
@@ -118,7 +127,8 @@ class GitLabBackend:
     def get_change_request(self, cr_id: int) -> ChangeRequest:
         mr = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}")
         status = mr.get("detailed_merge_status") or mr.get("merge_status") or ""
-        blocking = BLOCKING_MERGE_STATUS | (PIPELINE_MERGE_STATUS if self.pipeline_blocks else set())
+        blocking = BLOCKING_MERGE_STATUS | (PIPELINE_MERGE_STATUS if self.pipeline_blocks else set()) \
+            | (APPROVAL_MERGE_STATUS if self.approval_rules else set())
         blocked = sorted({status} & blocking)
         return ChangeRequest(
             id=mr["iid"],
@@ -175,6 +185,60 @@ class GitLabBackend:
         times = [_ts(v["created_at"]) for v in self.client.paged(f"{self._p}/merge_requests/{cr_id}/versions")
                  if v.get("head_commit_sha") == sha and v.get("created_at")]
         return max(times) if times else None
+
+    def approval_rule_blockers(self, cr_id: int) -> list[str]:
+        """Why GitLab's own approval rules don't allow this MR yet; [] if they do.
+
+        Premium/Ultimate: the MR approvals API reports approvals_required / approvals_left / approved
+        for the project's and MR's approval rules (code owner rules included). Apply needs approved
+        and approvals_left == 0. GitLab also counts approvals of an older commit (unless the project
+        removes approvals on push), so when some approvals aren't for the current head (see
+        approvers()), each rule is re-checked with only the head's approvals (approval_state); without
+        that endpoint, ferry refuses rather than guess.
+
+        Free/CE has no approval rules: the API has no approvals_required/approvals_left, so there is
+        nothing of GitLab's to enforce and this returns []. ferry's own min_approvals (head-only,
+        Developer+) is then the only approval gate.
+        """
+        if not self.approval_rules:
+            return []
+        try:
+            data = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}/approvals") or {}
+        except GitLabError as e:
+            if e.status == 404:  # no MR approvals at all here: no rules to meet
+                log.info("!%s: GitLab has no MR approvals API here; no approval rules to enforce", cr_id)
+                return []
+            raise
+        if "approvals_left" not in data and "approvals_required" not in data:
+            log.info("!%s: no approval rules on this GitLab (Free/CE); only ferry's min_approvals applies", cr_id)
+            return []
+        left = int(data.get("approvals_left") or 0)
+        if left > 0 or data.get("approved") is False:
+            return [f"GitLab's approval rules aren't met ({left} more approval(s) needed)"]
+        if int(data.get("approvals_required") or 0) == 0:
+            return []
+        given = {a["user"]["username"] for a in data.get("approved_by") or [] if a.get("user")}
+        current = set(self.approvers(cr_id))
+        if given <= current:
+            return []
+        return self._rules_with_head_approvals(cr_id, current)
+
+    def _rules_with_head_approvals(self, cr_id: int, current: set[str]) -> list[str]:
+        try:
+            state = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}/approval_state") or {}
+        except GitLabError as e:
+            if e.status not in (403, 404):
+                raise
+            return ["GitLab's approval rules are met only by counting approvals of an older commit; "
+                    "re-approve the current head (or have the project remove approvals when commits are added)"]
+        reasons = []
+        for r in state.get("rules") or []:
+            need = int(r.get("approvals_required") or 0)
+            have = {a.get("username") for a in r.get("approved_by") or []} & current
+            if len(have) < need:
+                reasons.append(f"GitLab approval rule `{r.get('name', '?')}` needs {need} approval(s) "
+                               f"of the current head, has {len(have)}")
+        return reasons
 
     def _resets_approvals_on_push(self) -> bool:
         try:

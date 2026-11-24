@@ -219,7 +219,7 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
     client = GitLabClient(required["FERRY_GITLAB_URL"].rstrip("/") + "/api/v4", token)
     project = required["FERRY_GITLAB_PROJECT"]
     info = client.request("GET", f"/projects/{urllib.parse.quote(project, safe='')}")
-    vcs = GitLabBackend(client, info["id"], pipeline_blocks=True)
+    vcs = GitLabBackend(client, info["id"], pipeline_blocks=True, approval_rules=True)
     vcs.bot_username()  # fail at startup, not on the first webhook, if the token is wrong
     settings = Settings(repo=info["path_with_namespace"], project_id=str(info["id"]),
                         default_branch=_env("FERRY_DEFAULT_BRANCH") or info.get("default_branch") or "main",

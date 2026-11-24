@@ -179,6 +179,15 @@ time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (o
   only if its `approved_at` is at or after the moment the head arrived (the MR diff version whose
   head is the MR's SHA). On a GitLab that doesn't report `approved_at`, approvals count only if the
   project removes approvals when commits are added; otherwise none count (and the service logs why).
+- **GitLab's own approval rules** gate apply too, on top of `apply.min_approvals` (which still
+  needs Developer+ approvers of the current head). On Premium/Ultimate, apply needs the MR
+  approvals API to say `approved` with `approvals_left: 0` (project and MR rules, code owners), and
+  `detailed_merge_status: not_approved` refuses. GitLab also counts approvals of older commits
+  unless the project removes approvals on push, so when some approvals aren't for the head, ferry
+  re-checks each rule (`approval_state`) with only the head's approvals, and refuses if it can't.
+  **Free/CE has no approval rules**: the approvals API has no `approvals_required`/`approvals_left`,
+  so there is nothing of GitLab's to enforce and `apply.min_approvals` is the only approval gate.
+  The CI driver is unchanged (GitLab enforces its rules at the merge button there).
 - **Mergeability** comes from `detailed_merge_status`. `unchecked`, `checking` and `preparing` mean
   GitLab hasn't decided yet: apply is refused, retry. A pending or failed MR pipeline
   (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;

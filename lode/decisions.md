@@ -94,3 +94,11 @@ refuse (GitHub's `unknown`). `ci_must_pass`/`ci_still_running` block in the serv
 (`pipeline_blocks=True`, like GitHub required checks) but not in the CI driver, whose apply job runs
 inside that pipeline. Token: project access token, Developer, api + read_repository.
 
+GitLab's approval rules gate the service's apply too (`approval_rules=True`, 2026-11-24): ferry's
+own count alone would let an apply through that GitLab's merge button would refuse (code owners, a
+required group). `approval_rule_blockers` needs `approvals_left == 0` and `approved`, and blocks on
+`not_approved`. GitLab's count includes approvals of older commits, so if any approval isn't for
+the head, each `approval_state` rule is re-counted with head approvals only; no approval_state ->
+refuse. Free/CE reports no approvals_required/approvals_left: nothing to enforce, logged, and
+min_approvals is the gate. Kept out of the CI driver to leave its behavior as it was.
+

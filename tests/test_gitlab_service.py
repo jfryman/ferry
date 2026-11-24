@@ -49,6 +49,7 @@ class World:
 
         self.gl = FakeGitLab()
         self.notes, self.approved_by = [], []
+        self.rules = None  # GitLab Premium approvals fields, e.g. {"approvals_required": 1, "approvals_left": 1}
         self.merge_status = "mergeable"
         self.developers = {"alice", "bob"}
         g = self.gl
@@ -58,7 +59,8 @@ class World:
                                             {"old_path": "ferry.yaml", "new_path": "ferry.yaml"}]
         g.routes[("GET", f"{MR}/notes")] = lambda u, d: (200, self.notes)
         g.routes[("POST", f"{MR}/notes")] = self._post
-        g.routes[("GET", f"{MR}/approvals")] = lambda u, d: (200, {"approved_by": self.approved_by})
+        g.routes[("GET", f"{MR}/approvals")] = lambda u, d: (200, {"approved_by": self.approved_by,
+                                                                   **(self.rules or {})})
         g.routes[("GET", f"{MR}/versions")] = [{"head_commit_sha": self.sha, "created_at": PUSHED},
                                                {"head_commit_sha": "0" * 40, "created_at": "2026-11-20T09:00:00Z"}]
         g.routes[("GET", "/user")] = {"username": BOT}
@@ -72,7 +74,8 @@ class World:
         self.locks = SQLiteLocks(tmp_path / "state" / "locks.db")
         self.svc = GitLabService(
             settings=Settings(repo="acme/ansible", project_id="9", ssh_user="root"),
-            vcs=GitLabBackend(GitLabClient(API, "tok", transport=g), "acme/ansible", pipeline_blocks=True),
+            vcs=GitLabBackend(GitLabClient(API, "tok", transport=g), "acme/ansible", pipeline_blocks=True,
+                              approval_rules=True),
             locks=self.locks,
             workspace=Workspace(tmp_path / "work", f"file://{bare}", change_ref="refs/merge-requests/{number}/head",
                                 git_user="oauth2"),
@@ -243,6 +246,30 @@ def test_plan_then_apply_then_close(world):
     assert unlock["released"] == ["homelab"] and world.locks.get("homelab") is None
 
 
+def test_gitlab_approval_rules_also_gate_apply(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    [plan] = world.drain()
+    assert plan["ok"], plan
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+
+    # ferry's own count is met (alice, Developer, head), but a GitLab rule wants one more approval.
+    world.rules = {"approvals_required": 2, "approvals_left": 1, "approved": False}
+    world.merge_status = "not_approved"
+    result, reasons = apply_reasons(world, "r1")
+    assert not result["ok"]
+    assert "GitLab's approval rules aren't met (1 more approval(s) needed)" in reasons
+    assert "MR is not mergeable (not_approved)" in reasons
+    assert all(r.check for r in world.runner.requests)  # nothing applied
+
+    world.rules = {"approvals_required": 2, "approvals_left": 0, "approved": True}
+    world.approved_by.append({"user": {"username": "bob"}, "approved_at": "2026-11-20T12:06:00Z"})
+    world.merge_status = "mergeable"
+    world.author = "carol"
+    result, reasons = apply_reasons(world, "r2")
+    assert result["ok"], reasons
+    assert world.runner.requests[-1].check is False
+
+
 def test_close_releases_locks(world):
     world.deliver("Merge Request Hook", world.mr_event())
     world.drain()
@@ -319,4 +346,4 @@ def test_build_gitlab_service_from_env(tmp_path, monkeypatch):
     assert (svc.settings.repo, svc.settings.project_id, svc.settings.default_branch) == ("acme/ansible", "9", "trunk")
     assert svc.workspace.remote == "https://gitlab.example.com/acme/ansible.git"
     assert svc.workspace.git_user == "oauth2" and svc.workspace._tok() == "tok"
-    assert svc.vcs.pipeline_blocks and fake.calls[0][1] == f"{API}/projects/acme%2Fansible"
+    assert svc.vcs.pipeline_blocks and svc.vcs.approval_rules and fake.calls[0][1] == f"{API}/projects/acme%2Fansible"

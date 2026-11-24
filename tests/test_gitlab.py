@@ -210,3 +210,103 @@ def test_webhook_token_and_trigger(gl):
     assert pid == 99
     sent = fake.calls[-1][2]
     assert sent["ref"] == "feat" and sent["variables"] == {"FERRY_ACTION": "apply", "FERRY_MR_IID": "4", "FERRY_USER": "james"}
+
+
+# ---- GitLab's own approval rules (Premium: approvals_required / approvals_left; Free/CE: neither) ----
+
+
+def rules(fake, approvals_left, approvals_required, approved_by, approved=None, state=None):
+    """EE-shaped approvals for MR 7 at head2 (arrived 12:00); state: approval_state rules, None = 404."""
+    data = {"approvals_required": approvals_required, "approvals_left": approvals_left, "approved_by": approved_by}
+    if approved is not None:
+        data["approved"] = approved
+    fake.routes[("GET", MR7)] = {"iid": 7, "sha": "head2", "detailed_merge_status": "mergeable"}
+    fake.routes[("GET", f"{MR7}/approvals")] = data
+    fake.routes[("GET", f"{MR7}/versions")] = VERSIONS
+    if state is not None:
+        fake.routes[("GET", f"{MR7}/approval_state")] = {"rules": state}
+
+
+OLD = {"user": {"username": "alice"}, "approved_at": "2026-11-20T11:00:00Z"}  # approved head1
+NEW = {"user": {"username": "kim"}, "approved_at": "2026-11-20T12:30:00Z"}  # approved head2
+
+
+def rules_backend(client):
+    return GitLabBackend(client, "infra/ansible", approval_rules=True)
+
+
+def test_approval_rules_off_asks_nothing(gl):
+    fake, client, be = gl
+    rules(fake, 2, 2, [])
+    assert be.approval_rule_blockers(7) == [] and fake.calls == []
+
+
+@pytest.mark.parametrize("approvals", [{"approved_by": [], "approved": False},  # CE 18.x, nobody approved
+                                       {"approved_by": [NEW], "approved": True, "user_can_approve": False},
+                                       None])  # None: the endpoint 404s
+def test_free_and_ce_have_no_rules_to_enforce(gl, approvals):
+    fake, client, _ = gl
+    if approvals is not None:
+        fake.routes[("GET", f"{MR7}/approvals")] = approvals
+    assert rules_backend(client).approval_rule_blockers(7) == []
+
+
+@pytest.mark.parametrize("left, approved", [(1, None), (2, False), (0, False)])
+def test_rules_not_met_block(gl, left, approved):
+    fake, client, _ = gl
+    rules(fake, left, 2, [NEW], approved=approved)
+    [reason] = rules_backend(client).approval_rule_blockers(7)
+    assert reason == f"GitLab's approval rules aren't met ({left} more approval(s) needed)"
+
+
+def test_rules_met_by_head_approvals_pass(gl):
+    fake, client, _ = gl
+    rules(fake, 0, 1, [NEW], approved=True)
+    assert rules_backend(client).approval_rule_blockers(7) == []
+    assert not any("approval_state" in c[1] for c in fake.calls)  # all approvals are for the head
+
+
+def test_no_required_approvals_pass_even_with_stale_ones(gl):
+    fake, client, _ = gl
+    rules(fake, 0, 0, [OLD], approved=True)
+    assert rules_backend(client).approval_rule_blockers(7) == []
+
+
+def test_rule_met_only_by_a_stale_approval_blocks(gl):
+    fake, client, _ = gl
+    state = [{"name": "infra-owners", "approvals_required": 1, "approved_by": [{"username": "alice"}]},
+             {"name": "All Members", "approvals_required": 1, "approved_by": [{"username": "kim"}]}]
+    rules(fake, 0, 2, [OLD, NEW], approved=True, state=state)
+    assert rules_backend(client).approval_rule_blockers(7) == [
+        "GitLab approval rule `infra-owners` needs 1 approval(s) of the current head, has 0"]
+
+
+def test_rules_each_met_by_head_approvals_pass_despite_a_stale_extra(gl):
+    fake, client, _ = gl
+    state = [{"name": "infra-owners", "approvals_required": 1, "approved_by": [{"username": "kim"}]},
+             {"name": "optional", "approvals_required": 0, "approved_by": [{"username": "alice"}]}]
+    rules(fake, 0, 1, [OLD, NEW], approved=True, state=state)
+    assert rules_backend(client).approval_rule_blockers(7) == []
+
+
+def test_stale_approvals_without_approval_state_refuse(gl):
+    fake, client, _ = gl
+    rules(fake, 0, 1, [OLD], approved=True, state=None)
+    [reason] = rules_backend(client).approval_rule_blockers(7)
+    assert "older commit" in reason
+
+
+def test_approvals_api_errors_are_not_swallowed(gl):
+    fake, client, _ = gl
+    fake.routes[("GET", f"{MR7}/approvals")] = lambda u, d: (500, {"message": "boom"})
+    with pytest.raises(Exception, match="500"):
+        rules_backend(client).approval_rule_blockers(7)
+
+
+def test_not_approved_merge_status_blocks_only_with_approval_rules(gl):
+    fake, client, be = gl
+    fake.routes[("GET", MR7)] = {"iid": 7, "sha": "head2", "source_branch": "f", "target_branch": "main",
+                                 "author": {"username": "pip"}, "state": "opened",
+                                 "detailed_merge_status": "not_approved"}
+    assert be.get_change_request(7).blocked_reasons == []  # the CI driver: unchanged
+    assert rules_backend(client).get_change_request(7).blocked_reasons == ["not_approved"]

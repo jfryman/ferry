@@ -174,6 +174,11 @@ class Engine:
                 + ("" if self.cfg.apply.allow_author_approval else " from someone other than the author")
                 + f", has {len(approvers)}"
             )
+        # The code host's own approval rules (GitLab Premium rules, code owners), on top of ferry's count.
+        # GitHub's required reviews already show up as mergeable_state "blocked" above.
+        host_rules = getattr(self.vcs, "approval_rule_blockers", None)
+        if host_rules is not None:
+            reasons.extend(host_rules(cr_id))
         allowed = self.cfg.apply.allowed_users
         if allowed and user not in allowed:
             reasons.append(f"`{user}` is not in apply.allowed_users")
