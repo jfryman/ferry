@@ -97,7 +97,10 @@ class Runs:
             claims = self.verifier.verify(auth[7:])
             subjects = self.svc.settings.run_allowed_subjects
             groups = self.svc.settings.run_allowed_groups
-            if claims['sub'] not in subjects and not set(claims.get('groups', [])).intersection(groups):
+            # Empty entries never match: unset env lists split to ('',), and a groups claim may hold "".
+            subjects = {x for x in subjects if x}
+            groups = {x for x in groups if x}
+            if claims['sub'] not in subjects and not {g for g in claims.get('groups', []) if g} & groups:
                 raise RunError(403, 'subject not allowed')
             try:
                 data = json.loads(body)
@@ -178,14 +181,19 @@ class Runs:
                        git_timeout=svc.workspace.git_timeout)
         # Slow config fetches serialize only other starts, never existing lease renewals.
         with self.config_mutex:
-            main, _ = ws.main(svc.settings.default_branch)
+            main, head = ws.main(svc.settings.default_branch)
             cfg = config.load(main / 'ferry.yaml')
+        # An apply runs only the reviewed default-branch head (the CLI analogue of refusing a stale
+        # PR plan). Check mode may name any published SHA. The SHA is still a client assertion.
+        if data['mode'] == 'apply' and data['sha'] != head:
+            raise RunError(409, f"apply requires the {svc.settings.default_branch} head ({head[:12]}): "
+                                "merge and pull, then retry")
         try:
             inv = cfg.inventory(data.get('inventory'))
         except KeyError:
             raise RunError(400, 'unknown inventory')
         allowed = cfg.apply_for(inv.name).run_allowed
-        identities = {claims['sub'], *claims.get('groups', [])}
+        identities = {claims['sub'], *(g for g in claims.get('groups', []) if g)}
         if not identities.intersection(allowed):
             raise RunError(403, 'inventory not allowed')
         if svc._disabled('apply'):

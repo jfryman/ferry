@@ -11,6 +11,8 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   streams and reject non-standard JSON NumericDates.
 - Operator hardening: apply disable gates both client-chosen modes; safe configurable display
   identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
+- `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
+  entries and empty group claims never match.
 
 ### Added
 - `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,

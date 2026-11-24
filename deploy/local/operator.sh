@@ -9,7 +9,8 @@ export FERRY_SSH_USER=root
 export ANSIBLE_REMOTE_USER=root
 export HOME=/tmp/operator-home
 mkdir -m 700 "$HOME"
-git clone -q --branch feature file:///remote/acme/ansible.git "$HOME/repo"
+# Check mode runs the PR branch; an apply must name the default-branch head (LAB_BRANCH=main).
+git clone -q --branch "${LAB_BRANCH:-feature}" file:///remote/acme/ansible.git "$HOME/repo"
 cd "$HOME/repo"
 # OpenBao 2.7 identity token generation is a GET (bao read), not bao write.
 exec ferry run -i lab --service http://ferry-lab-ferry:8080 --insecure-http \

@@ -535,6 +535,10 @@ apply:
 that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
 `POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Start also requires a bounded repo-relative `playbook` path (client-asserted, not attested). Finish accepts
 `{ok, counts}`; results are operator-reported, not independent execution attestation.
+An `apply` must name the current default-branch head (the service checks it against its own fetch
+and answers 409 otherwise), so a rule-following operator applies only merged code; check mode may
+name any published SHA. Empty entries in `FERRY_RUN_ALLOWED_SUBJECTS`/`_GROUPS`, and empty group
+claims, never match.
 CLI check versus apply is **client-chosen**, not enforced by the certificate: both receive the
 same inventory credential. Scheduled drift now takes the same inventory lock before minting
 credentials and records/skips held inventories. After service restart, stale `drift` holders are
