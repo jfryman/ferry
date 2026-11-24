@@ -18,14 +18,15 @@ say() { printf '\n==> %s\n' "$*"; }
 
 "$HERE/down.sh" >/dev/null 2>&1 || true
 wipe "$LAB"
-mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src,work,run}
+mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src,work,run,operators}
 chmod 777 "$LAB"/{ca,jwt,secrets,state,work,run}
 
 say "Building images (ferry:lab, ferry-target:lab)"
 docker build -q -t ferry:lab "$ROOT" >/dev/null
 docker build -q -t ferry-target:lab "$HERE/target" >/dev/null
+docker build -q --build-arg BAO_IMAGE="$BAO_IMAGE" -t ferry-operator:lab -f "$HERE/operator.Dockerfile" "$HERE" >/dev/null
 docker network create "$NET" >/dev/null
-run_py() { docker run --rm -u "$(id -u):$(id -g)" -v "$LAB:/lab" -v "$HERE:/lab-tools:ro" --entrypoint python ferry:lab "$@"; }
+run_py() { docker run --rm -i -u "$(id -u):$(id -g)" -v "$LAB:/lab" -v "$HERE:/lab-tools:ro" --entrypoint python ferry:lab "$@"; }
 
 say "OpenBao (dev): SSH CA, ferry signing role, vault password, Nomad-style JWT auth"
 docker run -d --name ferry-lab-bao --network "$NET" -p 18200:8200 --cap-add IPC_LOCK "$BAO_IMAGE" \
@@ -65,6 +66,27 @@ bao write auth/jwt-nomad/role/ferry - >/dev/null <<'JSON'
  "token_policies": ["ssh-sign-ferry", "ferry-vault-password"], "token_ttl": "15m", "token_max_ttl": "1h"}
 JSON
 
+# Operator identity only: no SSH signing, vault-password or service credentials. In production
+# an OIDC login supplies the entity-bound token; dev's root token creates these demo logins.
+say "OpenBao identity OIDC: RS256, audience ferry, allowed and denied demo operators"
+bao write identity/oidc/config issuer=http://ferry-lab-bao:8200 >/dev/null
+bao write identity/oidc/key/ferry algorithm=RS256 allowed_client_ids=ferry >/dev/null
+bao write identity/oidc/role/ferry key=ferry client_id=ferry ttl=5m >/dev/null
+bao policy write ferry-operator-identity - >/dev/null <<'HCL'
+path "identity/oidc/token/ferry" { capabilities = ["read"] }
+HCL
+TOKEN_ACCESSOR=$(bao auth list -format=json | run_py -c 'import json,sys; print(json.load(sys.stdin)["token/"]["accessor"])')
+for person in demo denied; do
+  entity=$(bao write -field=id identity/entity name="lab-$person")
+  printf '%s\n' "$entity" > "$LAB/operators/$person.entity"
+  bao write identity/entity-alias name="lab-$person" canonical_id="$entity" mount_accessor="$TOKEN_ACCESSOR" >/dev/null
+  bao write "auth/token/roles/lab-$person" allowed_policies=ferry-operator-identity \
+    allowed_entity_aliases="lab-$person" orphan=true renewable=false token_explicit_max_ttl=24h >/dev/null
+  bao token create -role="lab-$person" -entity-alias="lab-$person" -policy=ferry-operator-identity \
+    -field=token > "$LAB/operators/$person.token"
+done
+chmod 600 "$LAB/operators/"*.token
+
 say "Config repo with one PR, and its git remote"
 (
   cd "$LAB/src"
@@ -74,6 +96,7 @@ say "Config repo with one PR, and its git remote"
 inventories:
   - {name: lab, path: inventories/lab}
 YAML
+  printf 'apply:\n  run_allowed: ["%s"]\n' "$(cat "$LAB/operators/demo.entity")" >> ferry.yaml
   cat > inventories/lab/hosts.yml <<'YAML'
 all:
   hosts:
@@ -100,6 +123,15 @@ YAML
     mode: "0600"
   no_log: true
 YAML
+  # A real, committed long-running playbook: contention/expiry must not dirty the operator tree.
+  cat > slow.yml <<'YAML'
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: Hold the operator lease for the lab scenarios
+      ansible.builtin.pause:
+        seconds: 45
+YAML
   secret=$(docker run --rm --entrypoint sh ferry:lab -c \
     'printf lab-vault-pass > /tmp/p && ansible-vault encrypt_string --vault-password-file /tmp/p "s3cret-from-vault" --name lab_secret 2>/dev/null')
   { echo 'motd_text: "hello from main"'; echo "$secret"; } > inventories/lab/host_vars/target.yml
@@ -108,6 +140,7 @@ YAML
   sed -i.bak 's/hello from main/hello from the PR/' inventories/lab/host_vars/target.yml && rm -f inventories/lab/host_vars/target.yml.bak
   git commit -qam "PR: change the motd"
   git clone -q --bare . "$LAB/remote/acme/ansible.git"
+  git remote add origin file:///remote/acme/ansible.git
   git -C "$LAB/remote/acme/ansible.git" update-ref refs/pull/1/head "$(git rev-parse HEAD)"
   git rev-parse HEAD > "$LAB/pr_head"
 )
@@ -142,6 +175,9 @@ docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 -v "$LAB/git
   -e FERRY_GITHUB_REPO=acme/ansible -e FERRY_GITHUB_APP_ID=1 -e FERRY_GITHUB_APP_KEY_FILE=/secrets/app.pem \
   -e FERRY_WEBHOOK_SECRET_FILE=/secrets/webhook-secret \
   -e FERRY_COMMIT_STATUS=1 \
+  -e FERRY_RUN_OIDC_ISSUER=http://ferry-lab-bao:8200/v1/identity/oidc \
+  -e FERRY_RUN_OIDC_AUDIENCE=ferry -e FERRY_RUN_ALLOWED_SUBJECTS="$(cat "$LAB/operators/demo.entity")" \
+  -e FERRY_RUN_LEASE_SECONDS=8 \
   -e GITHUB_API_URL=http://ferry-lab-github:8080 -e FERRY_GITHUB_GIT_URL=file:///remote \
   -e FERRY_SSH_USER=root -e ANSIBLE_HOST_KEY_CHECKING=False \
   -e FERRY_OPENBAO_ADDR=http://ferry-lab-bao:8200 -e FERRY_OPENBAO_JWT_FILE=/jwt/nomad_openbao.jwt \
@@ -155,5 +191,6 @@ cat <<TXT
   ferry       http://localhost:18080  (POST /webhook, GET /healthz /metrics /jobs)
   fake GitHub http://localhost:18999/_state
   OpenBao     http://localhost:18200  (token: lab)
+  Operator:      $HERE/lab.sh run | run-apply | run-contention | run-expiry | run-denied
   Walk the loop:  $HERE/lab.sh open | comments | apply | approve | apply | motd | close
 TXT

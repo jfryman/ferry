@@ -36,6 +36,8 @@ expect() {  # expect NAME PATTERN TEXT: one PASS/FAIL line for the security scen
 }
 
 case "${1:-help}" in
+  run|run-apply|run-contention|run-expiry|run-denied)
+            . "$(dirname "$0")/operator-scenarios.sh" ;;
   open)     curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null
             pr_event opened "${2:-pip}"; echo; [ "${2:-pip}" = pip ] && wait_idle ;;
   plan)     comment "${2:-james}" "/ferry plan"; echo; wait_idle ;;
@@ -131,5 +133,5 @@ case "${1:-help}" in
   locks)    docker exec ferry-lab-ferry python -c 'import sqlite3; print(sqlite3.connect("/var/lib/ferry/state/locks.db").execute("select * from locks").fetchall())' ;;
   sshlog)   docker logs ferry-lab-target 2>&1 | grep -E "Accepted|refused|Refusing|CERT" | tail -${2:-5} ;;
   logs)     docker logs --tail "${2:-50}" ferry-lab-ferry ;;
-  *)        sed -n 's/^  \([a-z]*\)).*/  \1/p' "$0"; echo "  (see deploy/local/README.md)";;
+  *)        sed -n 's/^  \([a-z-]*\)).*/  \1/p' "$0"; echo "  run | run-apply | run-contention | run-expiry | run-denied"; echo "  (see deploy/local/README.md)";;
 esac
