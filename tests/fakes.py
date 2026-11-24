@@ -18,6 +18,7 @@ class FakeVCS:
         self.notes: dict[int, list[Note]] = {}
         self.developers = {"james", "pip"}
         self.commit_mrs: dict[str, list[int]] = {}
+        self.rule_blockers: dict[int, list[str]] = {}
         self._next = 1
 
     def add_cr(self, cr_id, sha="a" * 40, author="pip", files=None, **kw):
@@ -29,6 +30,9 @@ class FakeVCS:
 
     def get_change_request(self, cr_id):
         return self.crs[cr_id]
+
+    def merge_rule_blockers(self, cr):
+        return list(self.rule_blockers.get(cr.id, []))
 
     def changed_files(self, cr_id):
         return list(self.files[cr_id])

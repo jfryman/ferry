@@ -1,7 +1,9 @@
 """A stand-in for api.github.com: just enough for ferry serve and one PR (number 1).
 
 State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_head sets the
-PR head SHA (after you push to the PR branch). Run with the ferry image's Python.
+PR head SHA (after you push to the PR branch). The branch has one ruleset (one approving review);
+POST /_rules {"rules": [...]} replaces its rules (GitHub's /rules/branches shape), e.g. to require
+two approvals and watch apply refuse. Run with the ferry image's Python.
 """
 import json
 import os
@@ -11,11 +13,32 @@ REPO = os.environ.get("LAB_REPO", "acme/ansible")
 R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
 WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip").split(","))
-state = {"comments": [], "reviews": []}
+# Like a fresh repo with one ruleset: one approving review on main.
+state = {"comments": [], "reviews": [],
+         "rules": [{"type": "pull_request", "ruleset_id": 1,
+                    "parameters": {"required_approving_review_count": 1}}]}
 
 
 def head():
     return open(HEAD_FILE).read().strip()
+
+
+def approvals():
+    latest = {}
+    for rv in state["reviews"]:
+        latest[rv["user"]["login"]] = rv
+    return sum(1 for rv in latest.values() if rv["state"] == "APPROVED" and rv["commit_id"] == head())
+
+
+def gql_pr():
+    """GitHub's verdict, computed from the rules like GitHub would (reviews only; no checks here)."""
+    need = max([r["parameters"].get("required_approving_review_count", 0)
+                for r in state["rules"] if r["type"] == "pull_request"] or [0])
+    decision = None if not need else ("APPROVED" if approvals() >= need else "REVIEW_REQUIRED")
+    return {"headRefOid": head(), "reviewDecision": decision,
+            "mergeStateStatus": "BLOCKED" if decision == "REVIEW_REQUIRED" else "CLEAN",
+            "reviewRequests": {"nodes": []}, "reviewThreads": {"totalCount": 0, "nodes": []},
+            "commits": {"nodes": [{"commit": {"oid": head(), "statusCheckRollup": None}}]}}
 
 
 def pr():
@@ -51,6 +74,12 @@ class H(BaseHTTPRequestHandler):
         if p.startswith(f"{R}/collaborators/"):
             user = p.split("/")[-2]
             return self._j(200, {"role_name": "write" if user in WRITERS else "read"})
+        if p == f"{R}/rules/branches/main":
+            return self._j(200, state["rules"] if first else [])
+        if p == f"{R}/branches/main":
+            return self._j(200, {"name": "main", "protected": bool(state["rules"])})
+        if p == f"{R}/branches/main/protection":
+            return self._j(404, {"message": "Branch not protected"})  # rulesets only
         if p == "/_state":
             return self._j(200, state)
         self._j(404, {"message": "Not Found"})
@@ -65,6 +94,11 @@ class H(BaseHTTPRequestHandler):
                  "created_at": "now"}
             state["comments"].append(c)
             return self._j(201, c)
+        if self.path == "/graphql":
+            return self._j(200, {"data": {"repository": {"pullRequest": gql_pr()}}})
+        if self.path == "/_rules":
+            state["rules"] = d.get("rules", [])
+            return self._j(200, {"rules": state["rules"]})
         if self.path == "/_approve":
             state["reviews"].append({"user": {"login": d.get("user", "james")}, "state": "APPROVED",
                                      "commit_id": head()})

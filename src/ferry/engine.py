@@ -167,17 +167,31 @@ class Engine:
             reasons.append("MR has unresolved blocking discussions")
         for r in cr.blocked_reasons:
             reasons.append(f"MR is not mergeable ({r})")
-        approvers = [a for a in self.vcs.approvers(cr_id) if self.cfg.apply.allow_author_approval or a != cr.author]
+        # The code host's own rules (GitHub branch protection / rulesets) on top of ferry's: ferry never
+        # applies what the host would refuse to merge. Only for the head being applied; a stale run is
+        # already refused above.
+        if cr.open and cr.head_sha == sha:
+            reasons.extend(self.vcs.merge_rule_blockers(cr))
+        # An approval counts only from someone who could apply it themselves: on a public GitHub repo
+        # anyone can leave an approving review, and the code host's own rules may not require more.
+        # ferry's own account never counts (a job that got hold of its credentials could approve).
+        bot = self.vcs.bot_username()
+        approvers = [a for a in self.vcs.approvers(cr_id)
+                     if a != bot
+                     and (self.cfg.apply.allow_author_approval or a != cr.author)
+                     and self.vcs.can_apply(a)]
         if len(approvers) < self.cfg.apply.min_approvals:
             reasons.append(
                 f"needs {self.cfg.apply.min_approvals} approval(s)"
                 + ("" if self.cfg.apply.allow_author_approval else " from someone other than the author")
+                + " with write access (Developer+ on GitLab)"
                 + f", has {len(approvers)}"
             )
         allowed = self.cfg.apply.allowed_users
         if allowed and user not in allowed:
             reasons.append(f"`{user}` is not in apply.allowed_users")
-        elif not self.vcs.can_apply(user):
+        # Both checks: being listed doesn't outlive losing access to the repo.
+        if not self.vcs.can_apply(user):
             reasons.append(f"`{user}` may not apply here (needs Developer+ on GitLab, write on GitHub)")
 
         plan = self.latest_plan(cr_id, inventory)
