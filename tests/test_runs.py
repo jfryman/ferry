@@ -488,3 +488,18 @@ def test_drift_holder_refuses_operator(api):
     api.locks.try_acquire(Lock('homelab', 'drift', api.sha, 'schedule', NOW))
     assert api.request()[0] == 409
     assert api.bao.mock_calls == []
+
+
+@pytest.mark.parametrize('during', ['login', 'sign'])
+def test_switch_flip_at_credential_boundary_fails_closed(api, during):
+    def flip(*args):
+        api.svc.settings.allow_commands = ('plan',)
+        return 'test-only-bao-token' if during == 'login' else certificate(NOW+180)
+    getattr(api.bao, 'login' if during == 'login' else 'sign_ssh_key').side_effect = flip
+    assert api.request()[0] == 403
+    assert api.locks.count() == 0
+    if during == 'login':
+        api.bao.sign_ssh_key.assert_not_called()
+    assert api.svc.state.jobs() == []
+    with sqlite3.connect(api.locks.path) as db:
+        assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 0

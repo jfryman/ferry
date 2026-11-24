@@ -1461,3 +1461,30 @@ def test_drift_holds_lock_before_credentials_and_releases_on_error(world, monkey
     with pytest.raises(RuntimeError, match='upstream unavailable'):
         world.svc._drift()
     assert world.locks.get('homelab') is None
+
+
+def test_restart_recovers_drift_only_after_executor_idle(world, monkeypatch):
+    from ferry.locks import Lock
+    from unittest.mock import Mock
+    world.locks.try_acquire(Lock('homelab', 'drift', world.sha, 'schedule', NOW))
+    world.svc.settings.executor_socket = '/executor.sock'
+    probe = Mock(return_value=False)
+    monkeypatch.setattr('ferry.executor.idle_barrier', probe)
+    # Fresh service lifetime starts pending. Busy/unavailable executor retains previous holder.
+    world.svc.recover_drift()
+    assert world.locks.get('homelab').holder == 'drift'
+    assert world.svc._drift()['skipped'] == 'waiting for executor idle recovery'
+    probe.return_value = True
+    world.svc.recover_drift()
+    assert world.locks.get('homelab') is None
+    # The new service's active drift is never reaped by later periodic/API probes.
+    world.locks.try_acquire(Lock('homelab', 'drift', world.sha, 'schedule', NOW))
+    world.svc.recover_drift()
+    assert world.locks.get('homelab').holder == 'drift'
+
+
+def test_local_drift_recovery_fails_closed_without_executor(world):
+    from ferry.locks import Lock
+    world.locks.try_acquire(Lock('homelab', 'drift', world.sha, 'schedule', NOW))
+    world.svc.recover_drift()
+    assert world.locks.get('homelab').holder == 'drift'

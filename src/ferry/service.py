@@ -230,6 +230,8 @@ class Service:
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self.last_job: dict = {}
         self._job_red: Redactor | None = None  # the running job's redactor, for its error report
+        self._drift_recovery_pending = True
+        self._drift_recovery_mutex = threading.Lock()
         self.runs = None
         if self.settings.run_oidc_issuer and self.settings.run_oidc_audience:
             from .runs import Runs
@@ -238,6 +240,23 @@ class Service:
             self.runs = Runs(self)
         self._status_off = False  # the code host refused a status for lack of permission: stop trying
         self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
+
+    def recover_drift(self):
+        """One recovery per service lifetime, never reap this process's own live drift.
+
+        Shared SQLite has one service owner. Only the configured serial sidecar can
+        certify no previous execution remains. With no sidecar, fail closed: an orphan
+        local process cannot safely be inferred dead from a new service PID.
+        """
+        with self._drift_recovery_mutex:
+            if not self._drift_recovery_pending:
+                return
+            if not self.settings.executor_socket:
+                return
+            from .executor import idle_barrier
+            if idle_barrier(self.settings.executor_socket):
+                self.locks.release_all('drift')
+                self._drift_recovery_pending = False
 
     def marker_key(self) -> bytes:
         """Signs ferry's plan/apply markers: derived from the webhook secret, which only the service
@@ -588,6 +607,7 @@ class Service:
     def run_job(self, job: Job) -> dict:
         if self.runs:
             self.runs.expire()
+        self.recover_drift()
         started = self.clock()
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
@@ -809,6 +829,9 @@ class Service:
                                           max_age_days=st.collections_max_age_days)
 
     def _drift(self) -> dict:
+        self.recover_drift()
+        if self.settings.executor_socket and self._drift_recovery_pending:
+            return {"ok": True, "skipped": "waiting for executor idle recovery"}
         main_dir, sha = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")
         env = self._collections(main_dir)
@@ -967,6 +990,10 @@ def serve(service: Service, host: str = "0.0.0.0", port: int = 8080) -> None:
     threading.Thread(target=service.drift_scheduler, args=(stop,), daemon=True, name="ferry-drift").start()
     def expire_runs():
         while not stop.wait(1):
+            try:
+                service.recover_drift()
+            except Exception:
+                log.error("drift recovery unavailable")
             if service.runs:
                 try:
                     service.runs.expire()

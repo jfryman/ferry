@@ -25,10 +25,6 @@ Security fixes and Atlantis-parity features for `ferry serve`, from the 0.2.1 re
 #37). Both backends (GitHub and GitLab) get every change.
 
 ### Security
-- Pending operator leases cannot be finished/renewed before signing completes; validate lock
-  ownership before credentials return. Drift now participates in inventory locking.
-- Audit issuance immediately with a client-asserted relative playbook path; redact CLI terminal
-  streams and reject non-standard JSON NumericDates.
 - **Locks fail closed** (#21, #38): an API error while checking a lock holder (timeout, 5xx, rate
   limit) refuses and keeps the lock instead of giving it away; only a definite 404/410 makes a lock
   stale. Commands on closed or merged PRs are refused at the webhook, and a queued plan for a PR
@@ -72,10 +68,6 @@ Hardening and observability for `ferry serve`, from the 0.2.0 maintainer review 
 backends (GitHub and GitLab) get every change.
 
 ### Security
-- Pending operator leases cannot be finished/renewed before signing completes; validate lock
-  ownership before credentials return. Drift now participates in inventory locking.
-- Audit issuance immediately with a client-asserted relative playbook path; redact CLI terminal
-  streams and reject non-standard JSON NumericDates.
 - **Replays** (#11, #20): a delivery counts as a duplicate if its id *or* a digest of its exact
   body has been seen. The id isn't covered by GitHub's signature. Seen deliveries are kept in the
   state file for 7 days, so this holds across restarts. Events whose own timestamps are older than
@@ -128,10 +120,6 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 - `FERRY_JOB_TIMEOUT_MINUTES`, `FERRY_OPENBAO_SSH_TTL`, `FERRY_OPENBAO_SSH_PRINCIPAL`, `FERRY_STARTUP_ATTEMPTS`.
 
 ### Security
-- Pending operator leases cannot be finished/renewed before signing completes; validate lock
-  ownership before credentials return. Drift now participates in inventory locking.
-- Audit issuance immediately with a client-asserted relative playbook path; redact CLI terminal
-  streams and reject non-standard JSON NumericDates.
 - Only approvals from users who could apply count, and never ferry's own account. With `apply.allowed_users`, the applier must be listed **and** still have access (#2).
 - Write access (Developer+ on GitLab) is checked in the webhook handler, before a job or any credential exists. The job queue is bounded (503 when full). `/healthz` returns no error text (#3, #10).
 - Certificates are requested with an explicit TTL and principal. The job's credentials are redacted from output, and failed revokes are logged (#4).

@@ -46,5 +46,15 @@
   its own row. Metrics count completion only. Playbook is bounded repo-relative, client asserted.
 - Scheduled drift acquires each inventory lock before credentials, records/skips held inventories,
   and releases its `drift` holder in finally. PR/operator paths refuse that string holder.
-- CLI terminal streams are privately buffered then redacted (vault password/cert/private key,
-  config patterns and built-ins). Use no_log/diff:false for sensitive tasks regardless.
+- CLI terminal streams are merged/drained and buffered up to 1 MiB then redacted (vault password/cert/private key,
+  config patterns and built-ins, even short explicit secrets). On overflow withhold all text and
+  report truncation. Whole-output processing safely covers arbitrary cross-line patterns; use
+  no_log/diff:false for sensitive tasks regardless.
+
+## Drift restart recovery
+- Once per service lifetime, a serial-executor idle barrier acknowledges only after the previous
+  job and cleanup finish. Only then release stale `drift` holders. Retry busy/unavailable probes;
+  do not begin new scheduled drift before this succeeds. Never reap a new active drift.
+- Without a sidecar, fail closed; a restarted service cannot prove old local Ansible is gone.
+  Manual verified process shutdown precedes stale local lock removal. One service owns SQLite.
+- Recheck apply switches immediately before signing and immediately before run activation/return.

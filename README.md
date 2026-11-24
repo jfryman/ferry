@@ -537,7 +537,12 @@ that run's ID, certificate, vault password, inventory path and lease expiry. Lea
 `{ok, counts}`; results are operator-reported, not independent execution attestation.
 CLI check versus apply is **client-chosen**, not enforced by the certificate: both receive the
 same inventory credential. Scheduled drift now takes the same inventory lock before minting
-credentials and records/skips held inventories. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
+credentials and records/skips held inventories. After service restart, stale `drift` holders are
+recovered once the configured serial executor acknowledges an idle barrier (after prior job cleanup).
+Busy/unreachable/old executors retain the lock and retry; recovery runs once per service lifetime,
+never against a new active drift. With **no executor**, recovery fails closed: before manually
+releasing a stale drift row, the operator must stop/verify all old local Ansible processes are gone.
+An automatic local recovery cannot safely infer that from the service PID alone. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
 refuses **all new CLI runs, including check**. It does not revoke already-issued credentials. A PR lock refuses a run; a run lock refuses a PR.
 `FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
 actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
@@ -580,9 +585,12 @@ certificate expires, and existing SSH sessions may survive it. Lease expiry free
 not host access. Keep certificate TTLs short, restrict principals and monitor sshd serials.
 The playbook runs as your local user: it can read its own key/password **and any files accessible
 to your user**, including login-token files. A minimal child environment and temporary HOME are
-hygiene, not a sandbox. CLI stdout/stderr are buffered in private temporary files and passed through
-the existing redactor (including fetched vault password, certificate and private key) before terminal
-delivery. Output appears after Ansible exits. Redaction is a safety net: use `no_log: true` and
+hygiene, not a sandbox. CLI stdout/stderr are merged at the OS pipe (preserving observed write order), continuously drained,
+and buffered up to **1 MiB** in memory before whole-output redaction (including every non-empty
+fetched vault password, certificate and private key, regardless of length). Output appears after
+Ansible exits. If the limit is exceeded, **all captured output is withheld** and an explicit truncation
+notice is printed; this avoids exposing a partial secret/PEM prefix. Whole-output buffering is deliberate:
+arbitrary configured regexes and multiline credentials cannot be safely streamed with a fixed window. Redaction is a safety net: use `no_log: true` and
 `diff: false` on secret-bearing tasks; arbitrary transformed values and sensitive diffs cannot be
 reliably inferred by text filtering. Use a dedicated operator account/container for untrusted code; the lab does.
 The client SHA/limit/mode and result are audit assertions by an authorized operator, not proof that

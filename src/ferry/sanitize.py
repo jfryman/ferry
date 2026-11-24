@@ -43,7 +43,7 @@ class Redactor:
         values: list[str] | None = None,
     ):
         """`values`: exact secrets that live outside the environment (the vault password file's
-        contents); masked like credential env values, if 6+ characters long."""
+        contents); masked like credential env values, regardless of length."""
         environ = os.environ if environ is None else environ
         self._regexes = [re.compile(p, re.DOTALL) for p in BUILTIN_PATTERNS + list(patterns or [])]
         found = set()
@@ -53,7 +53,7 @@ class Redactor:
             if name in (env_vars or []) or _CRED_NAME.search(name):
                 found.add(value)
         for value in values or []:
-            if value and len(value) >= 6:
+            if value:
                 found.add(value)
         # Longest first so a value containing another is masked whole.
         self._values = sorted(found, key=len, reverse=True)

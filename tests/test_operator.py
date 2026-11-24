@@ -60,7 +60,8 @@ def test_deleted_remote_branch_not_trusted(tmp_path):
 
 
 @pytest.mark.parametrize('exit_code', [0, 7])
-def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch, capsys, exit_code):
+@pytest.mark.parametrize('output_kind', ['normal', 'short-multiline', 'overflow'])
+def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch, capsys, exit_code, output_kind):
     import json
     import time
     from types import SimpleNamespace
@@ -73,7 +74,12 @@ def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch,
     binary = tmp_path/'bin'
     binary.mkdir()
     executable = binary/'ansible-playbook'
-    executable.write_text('#!/usr/bin/env python3\nimport sys\nprint("vault-output-123")\nprint("certificate-output-456", file=sys.stderr)\nsys.exit('+str(exit_code)+')\n')
+    password = 'abc' if output_kind == 'short-multiline' else 'vault-output-123'
+    cert = 'line1\nline2' if output_kind == 'short-multiline' else 'certificate-output-456'
+    body = 'import sys\nprint('+repr(password)+')\nprint('+repr(cert)+', file=sys.stderr)\n'
+    if output_kind == 'overflow':
+        body += 'print("x" * (2*1024*1024))\n'
+    executable.write_text('#!/usr/bin/env python3\n'+body+'sys.exit('+str(exit_code)+')\n')
     executable.chmod(0o755)
     monkeypatch.setenv('PATH', str(binary)+':'+__import__('os').environ['PATH'])
     monkeypatch.setattr(operator, 'ferry_ansible_env', lambda *args: {})
@@ -82,8 +88,8 @@ def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch,
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def read(self, *args):
-            return json.dumps(dict(run_id='a'*32, certificate='certificate-output-456',
-                vault_password='vault-output-123', lease_expires_at=time.time()+300,
+            return json.dumps(dict(run_id='a'*32, certificate=cert,
+                vault_password=password, lease_expires_at=time.time()+300,
                 inventory_path='inventory')).encode()
     class Opener:
         def open(self, request, **kw):
@@ -94,7 +100,10 @@ def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch,
         playbook='site.yml', token_command='printf identity-test', inventory='demo', limit=None, apply=False)
     assert operator.run(args) == exit_code
     out = capsys.readouterr()
-    assert 'vault-output-123' not in out.out and 'certificate-output-456' not in out.err
-    assert '[REDACTED]' in out.out and '[REDACTED]' in out.err
+    assert password not in out.out and cert not in out.out and not out.err
+    if output_kind == 'overflow':
+        assert 'output truncated' in out.out and len(out.out) < 512
+    else:
+        assert out.out.count('[REDACTED]') == 2
     assert requests[0]['playbook'] == 'site.yml'
     assert requests[-1]['ok'] == (exit_code == 0)

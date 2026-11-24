@@ -90,7 +90,7 @@ def run(args):
     ok = False
     counts, changed = {}, []
     old_handlers = {}
-    stdout = stderr = None
+    reader = None
 
     def interrupted(signum, frame):
         raise KeyboardInterrupt()
@@ -165,12 +165,27 @@ def run(args):
                 cfg = config.load(repo / 'ferry.yaml')
                 red = Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths,
                                environ=env, values=[result['vault_password'], result['certificate'], key.read_text()])
-                # Buffer in private temporary files, then redact the complete streams (including
-                # multiline values) before terminal delivery. No pipe backpressure or split-secret leak.
-                stdout = tempfile.TemporaryFile(mode='w+b')
-                stderr = tempfile.TemporaryFile(mode='w+b')
+                # Merge streams at the OS pipe, drain continuously, retain at most 1 MiB.
+                # Whole-output redaction is intentional: arbitrary multiline patterns/PEM blocks
+                # cannot be safely emitted incrementally. On overflow discard ALL captured text,
+                # not a raw/truncated prefix which could contain an incomplete secret.
+                output = bytearray()
+                truncated = threading.Event()
                 proc = subprocess.Popen(cmd, cwd=repo, env=env, start_new_session=True,
-                                        stdout=stdout, stderr=stderr)
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                def drain():
+                    while True:
+                        chunk = proc.stdout.read(8192)
+                        if not chunk:
+                            break
+                        if not truncated.is_set():
+                            if len(output) + len(chunk) > 1024 * 1024:
+                                output.clear()
+                                truncated.set()
+                            else:
+                                output.extend(chunk)
+                reader = threading.Thread(target=drain, daemon=True)
+                reader.start()
                 # Lease failure before launch must not leave a live playbook.
                 if lease_failed.is_set():
                     terminate()
@@ -186,11 +201,14 @@ def run(args):
                     except subprocess.TimeoutExpired:
                         pass
                 rc = proc.wait()
-                for captured, destination in ((stdout, sys.stdout), (stderr, sys.stderr)):
-                    captured.seek(0)
-                    destination.write(red.text(captured.read().decode('utf-8', errors='replace')))
-                    destination.flush()
-                    captured.close()
+                reader.join(timeout=3)
+                if reader.is_alive():
+                    print('ferry run: output truncated (descendant kept pipe open)', flush=True)
+                elif truncated.is_set():
+                    print('ferry run: output truncated (1 MiB limit; captured output withheld)', flush=True)
+                else:
+                    sys.stdout.write(red.text(output.decode('utf-8', errors='replace')))
+                    sys.stdout.flush()
                 ok = rc == 0 and not lease_failed.is_set()
                 if events.exists():
                     summary = parse_file(events, 'FERRY_HOST_BUSY', rc)
@@ -199,9 +217,10 @@ def run(args):
                 return rc if rc > 0 else (0 if ok else 1)
             finally:
                 terminate()
-                for captured in (stdout, stderr):
-                    if captured is not None and not captured.closed:
-                        captured.close()
+                if reader is not None:
+                    reader.join(timeout=3)
+                    if not reader.is_alive() and proc.stdout:
+                        proc.stdout.close()
                 stop.set()
                 if renewer:
                     renewer.join(timeout=25)

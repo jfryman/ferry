@@ -105,6 +105,7 @@ class Runs:
                     raise ValueError()
             except ValueError:
                 raise RunError(400, 'bad json')
+            self.svc.recover_drift()
             self.expire()
             if path == '/api/runs':
                 return 201, self.start(claims, data)
@@ -220,6 +221,8 @@ class Runs:
         token = None
         try:
             token = svc.bao.login()
+            if svc._disabled('apply'):
+                raise RunError(403, 'CLI runs disabled while applies are disabled: check/apply is client-chosen')
             cert = svc.bao.sign_ssh_key(token, pub)
             serial, expires = certificate_details(cert)
             if expires <= svc.clock():
@@ -238,6 +241,8 @@ class Runs:
                     held = db.execute('SELECT holder FROM locks WHERE key = ?', (inv.name,)).fetchone()
                 if not persisted or json.loads(persisted[0]).get('state') != 'pending' or not held or held[0] != holder:
                     raise RunError(409, 'run or lock lost during start')
+                if svc._disabled('apply'):
+                    raise RunError(403, 'CLI runs disabled while applies are disabled: check/apply is client-chosen')
                 run.update(state='active', certificate_serial=serial, certificate_expires_at=expires,
                            lease_expires_at=min(svc.clock() + svc.settings.run_lease_seconds, expires))
                 self.save(run)

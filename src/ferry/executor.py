@@ -154,6 +154,23 @@ def install_collections(socket_path: str, checkout, timeout: float = galaxy_mod.
     return str(out["path"])
 
 
+def idle_barrier(socket_path: str, timeout: float = 0.2) -> bool:
+    """True only after the serial executor has finished its previous job AND cleanup.
+
+    The executor handles requests serially; a busy executor cannot acknowledge this probe.
+    Timeout/unavailable/old protocol fail closed. No credentials or execution in this request.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(socket_path)
+            conn.sendall(b'{"v":1,"op":"idle"}\n')
+            raw = conn.recv(64)
+            return json.loads(raw) == {"idle": True}
+    except (OSError, ValueError):
+        return False
+
+
 # ---- the executor ------------------------------------------------------------------------------
 
 
@@ -310,6 +327,9 @@ class Executor:
 
         try:
             msg = self._read_request(conn)
+            if msg == {"v": 1, "op": "idle"}:
+                send({"idle": True})
+                return
             if isinstance(msg, dict) and msg.get("op") == "galaxy" and msg.get("v") == 1:
                 send(self._galaxy(msg))
                 return
