@@ -153,3 +153,10 @@ def test_host_key_checking_is_its_own_flag(tmp_path, monkeypatch, capsys, insecu
                          insecure_http=insecure_http, no_host_key_checking=no_hkc)
     assert rc == 0
     assert f'HKC={expected}' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('reason', [None, 'restore DNS after failed upgrade'])
+def test_reason_is_sent_to_the_service(tmp_path, monkeypatch, capsys, reason):
+    rc, requests = run_operator(tmp_path, monkeypatch, 'sys.exit(0)\n', reason=reason)
+    assert rc == 0
+    assert requests[0]['reason'] == reason

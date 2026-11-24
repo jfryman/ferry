@@ -16,10 +16,14 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 - `--insecure-http` no longer turns off SSH host-key checking; that is `--no-host-key-checking` (#54).
 - Operator identity keys (JWKS) are cached for 5 min; an unknown `kid` refetches at most every
   30 s, so bad tokens no longer cause an outbound fetch each (#55).
+- A PR blocked by a CLI run's lock sees only `run:<id>`, never the operator's name or subject (#57).
 - `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
   entries and empty group claims never match.
 
 ### Added
+- `ferry run --reason`, and an audit log line (`ferry.runs`) for every CLI run event: issued,
+  ok/failed/expired and refused, with subject, inventory, SHA, mode and time. Refused starts for
+  a verified identity get a `refused` job record. README documents `ferry run` as break-glass.
 - `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,
   short renewable leases, OpenBao identity JWT verification and per-run SSH/vault credentials.
 - Default-branch per-inventory operator authorization, kill switches, certificate-serial audit

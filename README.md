@@ -499,8 +499,25 @@ SSH signer and audit, without a webhook:
 
 ```sh
 ferry run -i staging --service https://ferry.example.com site.yml          # --check --diff
-ferry run -i staging --service https://ferry.example.com --apply site.yml  # explicit write
+ferry run -i staging --service https://ferry.example.com --apply \
+  --reason "restore DNS after failed upgrade" site.yml                      # explicit write
 ```
+
+**`ferry run` is break-glass.** It skips the PR workflow: no review, no approval, no plan to
+compare against. Use it when the PR path is unavailable or too slow for an incident, and follow up
+with a PR that records what changed. What still holds: the caller must be on the global allow-list and
+the inventory's `run_allowed`, an apply must be the default-branch head (merged code), the inventory
+lock is shared with PR jobs, the apply switch stops CLI runs, and every run is audited.
+
+**Audit.** Each CLI run leaves job records (`GET /jobs`, the `jobs` table in the state database) and
+one `ferry.runs` log line per event: `issued`, then `ok`, `failed` or `expired`. Starts refused for a
+verified identity (not allowed, inventory locked, apply not on the default-branch head) are recorded too,
+with result `refused`. Each record has the identity subject and display name, inventory, SHA, mode,
+`--limit`, playbook, `--reason` and time; `issued` also logs the certificate serial, which sshd
+logs on the host. `--reason` is optional for now (at most 256 characters; control characters
+are removed). Requests with an invalid identity token are logged without a job record. The
+operator's name and subject are never put in code-host comments: a PR blocked by a CLI run sees
+only `run:<id>`.
 
 The tree must be clean (including untracked files) and HEAD reachable from an origin branch after
 fetching. The CLI generates a throwaway ed25519 key, renews its service lease, uses a private SSH
@@ -533,7 +550,7 @@ apply:
   run_allowed: [] # default for inventories without an override
 ```
 
-`POST /api/runs` accepts `{inventory, limit, mode: check|apply, sha, public_key}` and returns only
+`POST /api/runs` accepts `{inventory, limit, mode: check|apply, sha, public_key, reason?}` and returns only
 that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
 `POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Start also requires a bounded repo-relative `playbook` path (client-asserted, not attested). Finish accepts
 `{ok, counts}`; results are operator-reported, not independent execution attestation.

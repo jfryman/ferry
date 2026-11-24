@@ -117,7 +117,7 @@ def run(args):
                            check=True, capture_output=True)
             try:
                 result = request('/api/runs', dict(inventory=args.inventory, limit=args.limit,
-                    mode='apply' if args.apply else 'check', sha=sha, playbook=playbook.relative_to(repo).as_posix(), public_key=key.with_suffix('.pub').read_text()))
+                    mode='apply' if args.apply else 'check', sha=sha, reason=getattr(args, 'reason', None), playbook=playbook.relative_to(repo).as_posix(), public_key=key.with_suffix('.pub').read_text()))
                 run_id = result['run_id']
                 print(f'ferry run: {run_id} ({"apply" if args.apply else "check"})', flush=True)
                 (tmp / 'id_ed25519-cert.pub').write_text(result['certificate'])

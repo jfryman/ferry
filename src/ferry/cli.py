@@ -473,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-i", "--inventory")
     s.add_argument("--limit")
     s.add_argument("--apply", action="store_true")
+    s.add_argument("--reason", help="why this break-glass run is needed (recorded in the audit, max 256 chars)")
     s.add_argument("--service", default=_env("FERRY_SERVICE_URL", "https://ferry.example.com"))
     s.add_argument("--token-command", default=_env("FERRY_RUN_TOKEN_COMMAND",
                    "bao read -field=token identity/oidc/token/ferry"))
