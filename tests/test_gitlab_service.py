@@ -788,3 +788,18 @@ def test_require_inventory_on_gitlab(repo, tmp_path, monkeypatch):
     w.deliver("Note Hook", w.note_event("/ferry apply homelab"), delivery="inv-2")
     [ok] = w.drain()
     assert ok["ok"], ok
+
+
+# ---- #28 on GitLab ----------------------------------------------------------------------------------
+
+def test_gitlab_freeze_and_autoplan_switches(world, tmp_path, monkeypatch):
+    from test_service import count_credentials
+    world.svc.settings.switch_dir = str(tmp_path)
+    (tmp_path / "disable-autoplan").touch()
+    assert "autoplan" in world.deliver("Merge Request Hook", world.mr_event())[1]
+    (tmp_path / "disable-apply").touch()
+    minted = count_credentials(monkeypatch)
+    status, text = world.deliver("Note Hook", world.note_event("/ferry apply"))
+    assert "disabled" in text and world.svc.jobs.empty() and not minted
+    assert "applies are disabled" in world.notes[-1]["body"]
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[1] == "plan queued"

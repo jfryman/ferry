@@ -1093,3 +1093,144 @@ def test_a_single_inventory_repo_applies_bare_as_before(world):
     world.deliver("issue_comment", world.comment_event("/ferry apply"))
     [applied] = world.drain()
     assert applied["ok"]
+
+
+# ---- #28: switches that stop applies / autoplans without stopping the service -------------------
+
+def test_apply_not_in_allowed_commands_is_refused_at_the_webhook(world, monkeypatch):
+    minted = count_credentials(monkeypatch)
+    world.svc.settings.allow_commands = ("plan",)
+    status, text = world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    assert status == 202 and "disabled" in text and world.svc.jobs.empty() and not minted
+    assert "applies are disabled on this ferry" in world.comments[-1]["body"]
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+
+
+def test_the_freeze_file_stops_applies_while_the_service_runs(world, tmp_path, monkeypatch):
+    freeze = tmp_path / "switches" / "disable-apply"
+    world.svc.settings.switch_dir = str(freeze.parent)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    freeze.parent.mkdir()
+    freeze.write_text("change freeze until Monday\n")
+    minted = count_credentials(monkeypatch)
+    status, text = world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    assert "disabled" in text and world.svc.jobs.empty() and not minted
+    assert "change freeze until Monday" in world.comments[-1]["body"]
+    freeze.unlink()
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply"))[1] == "apply queued"
+    [applied] = world.drain()
+    assert applied["ok"]
+
+
+def test_a_queued_apply_is_rechecked_when_the_worker_picks_it_up(world, tmp_path, monkeypatch):
+    world.svc.settings.switch_dir = str(tmp_path)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply"))[1] == "apply queued"
+    (tmp_path / "disable-apply").touch()  # frozen while the job waited
+    minted = count_credentials(monkeypatch)
+    [r] = world.drain()
+    assert not r["ok"] and r["result"] == "refused" and not minted and len(world.runner.requests) == 1
+    assert "applies are disabled" in world.comments[-1]["body"]
+
+
+def test_autoplan_disabled_by_env_or_file(world, tmp_path):
+    world.svc.settings.disable_autoplan = True
+    status, text = world.deliver("pull_request", world.pr_event())
+    assert status == 202 and "autoplan" in text and world.svc.jobs.empty()
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+    world.drain()
+    world.svc.settings.disable_autoplan = False
+    world.svc.settings.switch_dir = str(tmp_path)
+    (tmp_path / "disable-autoplan").touch()
+    assert "autoplan" in world.deliver("pull_request", world.pr_event("synchronize"))[1]
+    (tmp_path / "disable-autoplan").unlink()
+    assert world.deliver("pull_request", world.pr_event("synchronize"))[1] == "plan queued"
+
+
+def test_a_queued_autoplan_is_dropped_once_autoplan_is_off(world, tmp_path, monkeypatch):
+    world.svc.settings.switch_dir = str(tmp_path)
+    world.deliver("pull_request", world.pr_event())
+    (tmp_path / "disable-autoplan").touch()
+    minted = count_credentials(monkeypatch)
+    [r] = world.drain()
+    assert r["result"] == "skipped" and not minted and not world.runner.requests
+
+
+def test_close_still_releases_locks_while_frozen(world, tmp_path):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.svc.settings.switch_dir = str(tmp_path)
+    (tmp_path / "disable-apply").touch()
+    (tmp_path / "disable-autoplan").touch()
+    world.closed = True
+    world.deliver("pull_request", world.pr_event("closed"))
+    [r] = world.drain()
+    assert r["released"] == ["homelab"]
+
+
+def test_healthz_and_metrics_show_the_switches(world, tmp_path):
+    world.svc.settings.switch_dir = str(tmp_path)
+    (tmp_path / "disable-apply").touch()
+    sw = world.svc.switches()
+    assert sw == {"apply": False, "autoplan": True, "plan": True,
+                  "why": {"apply": f"{tmp_path / 'disable-apply'} exists"}}
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(world.svc))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        health = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_port}/healthz").read())
+        assert health["switches"] == {"apply": False, "autoplan": True, "plan": True}
+        metrics = urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_port}/metrics").read().decode()
+        assert 'ferry_enabled{switch="apply"} 0' in metrics and 'ferry_enabled{switch="autoplan"} 1' in metrics
+    finally:
+        httpd.shutdown()
+
+
+def test_an_unreadable_switch_dir_fails_closed(world, tmp_path, monkeypatch):
+    world.svc.settings.switch_dir = str(tmp_path)
+    import ferry.service as service_mod
+    real = service_mod.os.path.lexists
+
+    def broken(path):
+        if str(path).startswith(str(tmp_path)):
+            raise PermissionError("no")
+        return real(path)
+    monkeypatch.setattr(service_mod.os.path, "lexists", broken)
+    sw = world.svc.switches()
+    assert sw["apply"] is False and sw["autoplan"] is False
+
+
+def test_allow_commands_from_the_environment(monkeypatch):
+    from ferry.service import parse_allow_commands
+    assert parse_allow_commands(None) == ("plan", "apply")
+    assert parse_allow_commands("plan") == ("plan",)
+    assert parse_allow_commands(" Plan , apply ") == ("plan", "apply")
+    assert parse_allow_commands("") == ()
+    with pytest.raises(ValueError):
+        parse_allow_commands("plan,destroy")
+
+
+def test_ferry_switch_cli_toggles_the_files_the_service_reads(world, tmp_path, monkeypatch, capsys):
+    from ferry import cli
+    monkeypatch.setenv("FERRY_SWITCH_DIR", str(tmp_path))
+    world.svc.settings.switch_dir = str(tmp_path)
+    assert cli.main(["switch", "apply", "off", "--reason", "incident 42"]) == 0
+    assert world.svc.switches()["apply"] is False
+    assert "incident 42" in world.svc._disabled("apply")
+    assert cli.main(["switch"]) == 0 and "disable-apply: ON (incident 42)" in capsys.readouterr().out
+    assert cli.main(["switch", "apply", "on"]) == 0
+    assert world.svc.switches()["apply"] is True
+    assert cli.main(["switch", "autoplan", "off"]) == 0 and world.svc.switches()["autoplan"] is False
+
+
+def test_serve_reads_the_switch_environment(monkeypatch, tmp_path):
+    from ferry import cli
+    monkeypatch.setenv("FERRY_ALLOW_COMMANDS", "plan")
+    monkeypatch.setenv("FERRY_LOCK_DB", str(tmp_path / "state" / "locks.db"))
+    assert cli._allow_commands() == ("plan",) and cli._switch_dir() == str(tmp_path / "state")
+    monkeypatch.setenv("FERRY_ALLOW_COMMANDS", "plan,nuke")
+    with pytest.raises(SystemExit):
+        cli._allow_commands()

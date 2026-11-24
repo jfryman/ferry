@@ -13,7 +13,7 @@ from typing import Callable
 ACTIONS = ("plan", "apply", "unlock", "drift")
 RESULTS = ("ok", "failed", "refused", "skipped", "error")
 REJECT_REASONS = ("bad_auth", "duplicate", "stale", "future", "undated", "bad_json", "foreign_repo",
-                  "no_access", "head_moved", "queue_full", "too_large", "bad_request")
+                  "no_access", "head_moved", "queue_full", "too_large", "bad_request", "disabled")
 DURATION_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600)
 
 HELP = {
@@ -25,6 +25,7 @@ HELP = {
     "ferry_queue_depth": ("gauge", "Jobs waiting for the worker."),
     "ferry_locks_held": ("gauge", "Inventory locks currently held."),
     "ferry_build_info": ("gauge", "The running ferry version."),
+    "ferry_enabled": ("gauge", "1 if plan, apply or automatic plans are enabled on this ferry, 0 if switched off."),
 }
 
 
@@ -41,6 +42,7 @@ def reject_reason(status: int, text: str) -> str | None:
         (t.startswith("not this service's"), "foreign_repo"),
         ("refused: no " in t, "no_access"),
         (t.endswith("the head isn't the one commented on"), "head_moved"),
+        (t.endswith("refused: disabled") or t == "autoplan disabled", "disabled"),
         (status == 503, "queue_full"),
         (status == 413, "too_large"),
         (status in (400, 411), "bad_request"),
