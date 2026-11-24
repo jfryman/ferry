@@ -1,6 +1,6 @@
 # Operator runs
 
-[Up: summary](summary.md) · [Decisions](decisions.md) · [User contract](../README.md#operator-runs-ferry-run)
+[Up: summary](summary.md) · [Decisions](decisions.md) · [User contract](../docs/run.md)
 
 - Service is the junction: only it signs, after identity, inventory authorization, switches and
   the shared SQLite inventory lock. OpenBao stores identity/tokens, never locks or job state.

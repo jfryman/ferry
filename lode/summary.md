@@ -29,20 +29,21 @@ from GitLab CI (`ferry plan|apply|drift|unlock`), or as a long-lived webhook ser
 
 ```mermaid
 flowchart LR
-  CLI[ferry.cli\nGitLab CI driver] --> E[ferry.engine.Engine]
-  SVC[ferry.service / gitlab_service\nferry serve] --> E
-  SVC --> CR[credentials.py\nOpenBao per job]
-  SVC --> WS[workspace.py\nexact-SHA checkouts]
-  SVC --> ST[state.py\ndeliveries, heads, jobs]
-  SVC --> M[metrics.py\n/metrics]
-  E --> VCS[VCSBackend\nvcs/github.py, vcs/gitlab.py]
-  E --> L[LockStore\nlocks.py: SQLite / GitLab tags / memory]
-  E --> R[Runner\nrunner.py, or executor.py over a socket]
-  R --> CB[callback ferry_events\nJSON lines]
-  CB --> RES[results.py\nper-host summary]
-  E --> SC[scope.py\nfiles -> --limit]
-  E --> P[policy.py]
-  E --> RE[render.py + sanitize.py\ncomments]
+    CLI["ferry.cli<br/>GitLab CI driver"] --> E["ferry.engine.Engine"]
+    SVC["ferry.service, gitlab_service<br/>ferry serve"] --> E
+    SVC --> CR["credentials.py<br/>OpenBao per job"]
+    SVC --> WS["workspace.py<br/>exact-SHA checkouts"]
+    SVC --> ST["state.py<br/>deliveries, heads, jobs"]
+    SVC --> M["metrics.py<br/>/metrics"]
+    SVC --> RN["runs.py, run_identity.py<br/>operator run API"]
+    E --> VCS["VCSBackend<br/>vcs/github.py, vcs/gitlab.py"]
+    E --> L["LockStore<br/>locks.py: SQLite, GitLab tags, memory"]
+    E --> R["Runner<br/>runner.py, or executor.py over a socket"]
+    R --> CB["callback ferry_events<br/>JSON lines"]
+    CB --> RES["results.py<br/>per-host summary"]
+    E --> SC["scope.py<br/>files to --limit"]
+    E --> P["policy.py"]
+    E --> RE["render.py, sanitize.py<br/>comments"]
 ```
 
-See [decisions.md](decisions.md) for why it's built this way, README for user-facing behavior.
+See [decisions.md](decisions.md) for why it's built this way, and [docs/](../docs/concepts.md) for user-facing behavior.

@@ -6,7 +6,9 @@
 - [practices.md](practices.md): how to change, test, merge, release; image CI
 - `tmp/`: session scratch (git-ignored)
 
-User-facing behavior (gates, locks, drift metrics, threat model) is in the top-level README.
+User-facing behavior is in `docs/` (map in the top-level README): gates, locks and drift in
+`docs/concepts.md`, the threat model in `docs/security.md`, settings in `docs/configuration.md`.
+Rules for coding agents are in the top-level `AGENTS.md`.
 - `deploy/local/README.md`: the local lab (full service loop, OpenBao, SSH certificates), how it maps to production, things to try
 - `CHANGELOG.md`: release notes per version
 - `.github/workflows/`: `ci.yml` (tests), `image.yml` (multi-arch image to GHCR)
