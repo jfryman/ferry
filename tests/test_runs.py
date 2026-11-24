@@ -20,7 +20,7 @@ from ferry import config
 from ferry.engine import Engine
 from ferry.locks import new_lock
 from ferry.run_identity import IdentityVerifier
-from ferry.runs import Runs
+from ferry.runs import Runs, duration_seconds
 from ferry.service import make_handler
 from ferry.state import SQLiteState
 from ferry.workspace import Workspace
@@ -352,7 +352,7 @@ def test_blocked_start_does_not_starve_existing_lease(api):
 
 def test_inflight_signing_keeps_lock_but_cannot_resurrect_elapsed_lease(api):
     entered, release = threading.Event(), threading.Event()
-    def slow_sign(*args):
+    def slow_sign(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return certificate(NOW+180)
@@ -434,7 +434,7 @@ def test_identity_expiration_has_no_leeway(api):
 @pytest.mark.parametrize('action', ['finish', 'lease'])
 def test_pending_run_cannot_be_finished_or_renewed(api, action):
     entered, release = threading.Event(), threading.Event()
-    def sign(*args):
+    def sign(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return certificate(NOW+180)
@@ -460,7 +460,7 @@ def test_pending_run_cannot_be_finished_or_renewed(api, action):
 
 @pytest.mark.parametrize('lost', ['run', 'lock'])
 def test_lost_pending_state_fails_closed(api, lost):
-    def sign(*args):
+    def sign(*args, **kwargs):
         with sqlite3.connect(api.locks.path) as db:
             db.execute('DELETE FROM '+('runs' if lost == 'run' else 'locks'))
         return certificate(NOW+180)
@@ -492,7 +492,7 @@ def test_drift_holder_refuses_operator(api):
 
 @pytest.mark.parametrize('during', ['login', 'sign'])
 def test_switch_flip_at_credential_boundary_fails_closed(api, during):
-    def flip(*args):
+    def flip(*args, **kwargs):
         api.svc.settings.allow_commands = ('plan',)
         return 'test-only-bao-token' if during == 'login' else certificate(NOW+180)
     getattr(api.bao, 'login' if during == 'login' else 'sign_ssh_key').side_effect = flip
@@ -525,3 +525,27 @@ def test_empty_group_never_matches(api, where):
     status, _ = api.request(token=token)
     assert status == 403
     assert_not_minted(api)
+
+
+def test_cli_certificate_requests_short_ttl(api):
+    assert api.request()[0] == 201
+    assert api.bao.sign_ssh_key.call_args.kwargs['ttl'] == '15m'
+
+
+def test_cli_certificate_longer_than_ttl_is_refused(api):
+    api.svc.settings.run_cert_ttl = '2m'
+    api.bao.sign_ssh_key.return_value = certificate(NOW + 600)
+    status, body = api.request()
+    assert status == 503 and 'certificate' not in body
+    assert api.locks.count() == 0
+
+
+@pytest.mark.parametrize('value,seconds', [('15m', 900), ('900', 900), ('90s', 90), ('1h', 3600)])
+def test_duration_seconds(value, seconds):
+    assert duration_seconds(value) == seconds
+
+
+@pytest.mark.parametrize('value', ['', '0m', '-5m', '15d', 'soon'])
+def test_duration_seconds_rejects(value):
+    with pytest.raises(ValueError):
+        duration_seconds(value)

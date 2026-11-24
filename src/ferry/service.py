@@ -206,6 +206,7 @@ class Settings:
     run_allowed_groups: tuple = ()
     run_name_claim: str = "name"
     run_lease_seconds: float = 300.0
+    run_cert_ttl: str = "15m"  # CLI certificates only; the role's max_ttl still caps it
 
 
 @dataclass
@@ -237,6 +238,8 @@ class Service:
             from .runs import Runs
             if self.settings.run_lease_seconds <= 0:
                 raise ValueError('run lease must be positive')
+            from .runs import duration_seconds
+            duration_seconds(self.settings.run_cert_ttl)  # fail at startup, not on the first run
             self.runs = Runs(self)
         self._status_off = False  # the code host refused a status for lack of permission: stop trying
         self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
