@@ -45,7 +45,7 @@ All re-checked inside the apply job, against live GitLab state:
 - Re-computed scope equals the planned scope.
 - MR open, not draft, no conflicts, blocking discussions resolved, not otherwise unmergeable
   (`ci_still_running` is fine: the apply job runs in that pipeline).
-- `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`).
+- `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`). Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
 - The person running it has Developer+ (or is in `apply.allowed_users`).
 - The MR holds the inventory lock (or the lock is free / its holder MR is closed or merged).
 

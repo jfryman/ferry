@@ -79,3 +79,12 @@ the previous job's open master connection, so it ran under the previous job's ce
 job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
 ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
 per job, verified by distinct serials in the target's sshd log.
+
+## Approvals must come from someone who could apply
+Found reviewing the service (2026-11-23): `approvers()` returned every user whose latest review
+approved the head, and the engine only dropped the author. On a public GitHub repo without branch
+protection requiring reviews, anyone can leave an approving review, and a drive-by approval was
+enough to apply in the local lab. The engine now counts an approval only if `can_apply()` is true for
+that user (write on GitHub, Developer+ on GitLab) and it isn't ferry's own account (a job that got
+hold of the service's credentials could otherwise approve). With `apply.allowed_users` set, the
+applier must be listed **and** still have access.
