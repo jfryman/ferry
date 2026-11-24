@@ -43,7 +43,7 @@ Drift raises alerts; auto-apply of main is not implemented (James to decide).
 GitLab API via urllib so the package installs anywhere Ansible does.
 
 ## GitHub backend, for an Atlantis-style service
-Atomic runs ferry as a long-running service on Nomad with a GitHub App (James, 2026-11-23): webhooks
+ferry can run as a long-running service (e.g. on Nomad) with a GitHub App (decided 2026-11-23): webhooks
 in, clone with the App's installation token at the PR head SHA, comments as the App. In GitHub Actions
 a `pull_request` workflow comes from the PR branch, so a PR could take the job's credentials; the
 service keeps the credential and its config on the default branch. `GitHubBackend` is token-agnostic
@@ -69,7 +69,7 @@ token reaches git only via GIT_CONFIG_* env (http.extraHeader), never .git/confi
 auto-plan only for authors with write access; others wait for `/ferry plan` from a writer (a plan is
 root-level code execution). Per-job OpenBao credentials (workload-identity login, throwaway SSH key +
 CA certificate, vault password) live in a 0700 temp dir that is removed, and the token revoked, in a
-finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, atomic-terraform#230's SSH
+finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, an SSH signing
 role, sshd login with the certificate) and the built image against a fake GitHub API plus a real git
 remote (plan, refused apply, apply, unlock).
 
