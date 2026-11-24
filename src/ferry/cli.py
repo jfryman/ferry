@@ -259,8 +259,8 @@ def build_service(vcs: str | None = None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     common = dict(run_name_claim=_env("FERRY_RUN_NAME_CLAIM", "name"), run_oidc_issuer=_env("FERRY_RUN_OIDC_ISSUER"),
                   run_oidc_audience=_env("FERRY_RUN_OIDC_AUDIENCE"),
-                  run_allowed_subjects=tuple((_env("FERRY_RUN_ALLOWED_SUBJECTS") or "").split(",")),
-                  run_allowed_groups=tuple((_env("FERRY_RUN_ALLOWED_GROUPS") or "").split(",")),
+                  run_allowed_subjects=tuple(x.strip() for x in (_env("FERRY_RUN_ALLOWED_SUBJECTS") or "").split(",") if x.strip()),
+                  run_allowed_groups=tuple(x.strip() for x in (_env("FERRY_RUN_ALLOWED_GROUPS") or "").split(",") if x.strip()),
                   run_lease_seconds=float(_env("FERRY_RUN_LEASE_SECONDS", "300")), ssh_user=_env("FERRY_SSH_USER"), drift_interval_hours=float(_env("FERRY_DRIFT_INTERVAL_HOURS", "0")),
                   job_timeout_minutes=float(_env("FERRY_JOB_TIMEOUT_MINUTES", "0")),
                   max_event_age_minutes=float(_env("FERRY_WEBHOOK_MAX_AGE_MINUTES", "10")),

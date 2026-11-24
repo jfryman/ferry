@@ -101,7 +101,7 @@ def api(repo, tmp_path, monkeypatch, signer):
     apply:
       run_allowed: [restricted-operator-example]
 ''')
-    world.main = Mock(return_value=(trusted, 'b'*40))
+    world.main = Mock(return_value=(trusted, world.sha))
     monkeypatch.setattr(Workspace, 'main', world.main)
     world.bao = Mock()
     world.bao.s = SimpleNamespace(vault_password_path='secret/example', vault_password_field='password')
@@ -503,3 +503,25 @@ def test_switch_flip_at_credential_boundary_fails_closed(api, during):
     assert api.svc.state.jobs() == []
     with sqlite3.connect(api.locks.path) as db:
         assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 0
+
+
+def test_apply_requires_default_branch_head(api):
+    payload = {**api.payload, 'sha': 'c'*40}
+    status, body = api.request(data=payload)
+    assert status == 409 and 'head' in body['error']
+    assert_not_minted(api)
+
+
+def test_check_may_name_any_published_sha(api):
+    status, body = api.request(data={**api.payload, 'mode': 'check', 'sha': 'c'*40})
+    assert status == 201 and body['certificate']
+
+
+@pytest.mark.parametrize('where', ['global', 'inventory'])
+def test_empty_group_never_matches(api, where):
+    api.svc.settings.run_allowed_subjects = ('',)
+    api.svc.settings.run_allowed_groups = ('',) if where == 'global' else ('operators-example',)
+    token = api.token({'sub': 'stranger-example', 'groups': ['']})
+    status, _ = api.request(token=token)
+    assert status == 403
+    assert_not_minted(api)
