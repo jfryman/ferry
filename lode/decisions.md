@@ -119,3 +119,17 @@ exists only in the per-job env, which the default Redactor (os.environ) never sa
 builds the redactor from os.environ plus the job env, and the runner echoes redacted lines (in the
 service the echo goes to the service log, not a CI log). A failed token revoke is logged, not swallowed.
 Kubernetes auth needs no code: its login body is the same `{role, jwt}` as the jwt method.
+
+## Playbooks run in `ferry executor`, not in the service (2026-11-24)
+A PR's playbooks are untrusted code on the controller. Under the service's uid they could read the
+App key or GitLab token, the webhook secret, the workload JWT and the lock DB, and they got the
+service's whole environment. Now `ferry serve` with FERRY_EXECUTOR_SOCKET sends each run to
+`ferry executor` in a second container (uid 10002) over a Unix socket. That container has no secret
+mounts, has the work dir read-only, and gets the job's env plus its credential files' contents.
+Chosen over a same-container uid switch, which needs root or CAP_SETUID and leaves the secrets on
+the same filesystem, and over a pod/job per run, which needs a pods/create or job-submit grant.
+The job's OpenBao token is revoked before any playbook runs (opt back in:
+FERRY_OPENBAO_PLAYBOOK_TOKEN). As PID 1 the executor runs kill(-1) after each job and rebinds a
+replaced socket, so leftovers can't catch the next job. The playbook still reads the job's cert and
+vault password: inherent. The static policy is a lint, not a boundary: a lookup plugin in the repo
+runs on the controller during a plan (the lab's `evil` uses one).

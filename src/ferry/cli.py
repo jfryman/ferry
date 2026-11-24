@@ -129,6 +129,10 @@ SERVE_HELP = """Run ferry as a GitHub App service (Atlantis-style). Settings com
   (valid_principals to request; default: the role's default_user)
   FERRY_JOB_TIMEOUT_MINUTES      kill a plan/apply/drift run after this long (0: no limit); keep it
                                  below the certificate TTL
+  FERRY_EXECUTOR_SOCKET          run playbooks in `ferry executor` (a separate user/container that
+                                 can't read this service's secrets) instead of as this process
+  FERRY_OPENBAO_PLAYBOOK_TOKEN   1: give playbooks the job's OpenBao token (VAULT_TOKEN) for lookups.
+                                 Default off: the token is revoked before any playbook runs
   Kubernetes: OpenBao's kubernetes (or jwt) auth takes the same login, so set
   FERRY_OPENBAO_AUTH_MOUNT=kubernetes and FERRY_OPENBAO_JWT_FILE to the service account token
   (/var/run/secrets/kubernetes.io/serviceaccount/token, or a projected token with an audience).
@@ -175,6 +179,7 @@ def build_service():
             vault_password_field=_env("FERRY_OPENBAO_VAULT_PASSWORD_FIELD", "password"),
             ssh_ttl=_env("FERRY_OPENBAO_SSH_TTL"),
             ssh_principal=_env("FERRY_OPENBAO_SSH_PRINCIPAL"),
+            playbook_token=_env("FERRY_OPENBAO_PLAYBOOK_TOKEN", "") in ("1", "true", "yes"),
         ))
     settings = Settings(
         repo=repo,
@@ -190,7 +195,50 @@ def build_service():
         workspace=Workspace(_env("FERRY_WORKDIR", "/var/lib/ferry/work"), f"{git_url}/{repo}.git", tokens),
         secret=secret.encode(),
         bao=bao,
+        **_runner_factory(),
     )
+
+
+def _runner_factory() -> dict:
+    """With FERRY_EXECUTOR_SOCKET, playbooks run in `ferry executor` (another user/container)."""
+    sock = _env("FERRY_EXECUTOR_SOCKET")
+    if not sock:
+        return {}
+    from .executor import ExecutorRunner
+    return {"runner_factory": lambda repo, marker, env: ExecutorRunner(sock, repo, marker, env=env)}
+
+
+EXECUTOR_HELP = """Run the playbooks for `ferry serve`, as a user that can't read the service's secrets.
+
+Start it as a different user than the service, ideally in its own container that mounts none of the
+service's secrets, sharing two directories with the service: the work dir (read-only here) and the
+socket's directory. Point the service at the same socket with FERRY_EXECUTOR_SOCKET.
+
+  FERRY_EXECUTOR_SOCKET          Unix socket to listen on (required), e.g. /run/ferry/executor.sock
+  FERRY_WORKDIR                  the service's work dir: jobs may only run in checkouts under it
+                                 (default /var/lib/ferry/work)
+  FERRY_EXECUTOR_MUST_NOT_READ   colon-separated paths of service secrets; the executor refuses to
+                                 start if it can read any of them (or if it runs as root)
+
+As its container's PID 1 it also kills every other process in the container after each job.
+"""
+
+
+def run_executor() -> int:
+    import logging
+    import signal
+
+    from .executor import Executor
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    sock = _env("FERRY_EXECUTOR_SOCKET") or sys.exit("ferry executor: FERRY_EXECUTOR_SOCKET is required")
+    problems = Executor.check_separation((_env("FERRY_EXECUTOR_MUST_NOT_READ") or "").split(":"))
+    if problems:
+        sys.exit(f"ferry executor: not separated from the service: {'; '.join(problems)}")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # PID 1 has no default SIGTERM action
+    Executor(sock, [_env("FERRY_WORKDIR", "/var/lib/ferry/work")],
+             ansible_playbook=_env("FERRY_EXECUTOR_ANSIBLE_PLAYBOOK", "ansible-playbook")).serve_forever()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -229,8 +277,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("serve", help="GitHub App webhook service", description=SERVE_HELP,
                    formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub.add_parser("executor", help="run serve's playbooks as a separate, unprivileged user",
+                   description=EXECUTOR_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     args = p.parse_args(argv)
+
+    if args.cmd == "executor":
+        return run_executor()
 
     if args.cmd == "serve":
         from .service import serve

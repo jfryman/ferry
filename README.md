@@ -160,6 +160,40 @@ merge state for the viewer.
 
 The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unchanged.
 
+## Playbooks run apart from the service (`ferry executor`)
+
+A plan runs the change's own playbooks, and a playbook can run code on the controller: lookups,
+`delegate_to: localhost`, `check_mode: false` tasks, plugins in the repo. Run as the service, that
+code could read the App key or GitLab token, the webhook secret, the workload identity token and
+the lock file. So with `FERRY_EXECUTOR_SOCKET` set, `ferry serve` doesn't run ansible itself:
+`ferry executor` does, as another user (`ferry-run`, uid 10002 in the image), in its own container
+that mounts none of those secrets.
+
+- The two share the work dir (read-only for the executor; the files belong to the service's user
+  anyway) and the socket's directory. Per job the service sends the ansible-playbook arguments, the
+  job's own environment (never the service's) and the contents of the job's credential files. The
+  executor writes those into a private per-job directory, runs the play, streams the output back and
+  deletes the directory.
+- The job's OpenBao token is revoked as soon as the certificate and vault password are fetched,
+  before any playbook runs. To give playbooks a token for `community.hashi_vault` lookups, set
+  `FERRY_OPENBAO_PLAYBOOK_TOKEN=1`. That token can sign more certificates until it expires.
+- As its container's PID 1, the executor kills every other process in the container after each job.
+  It also binds its socket again if a playbook replaced it, so nothing a playbook leaves behind sees
+  the next job's credentials.
+- `FERRY_EXECUTOR_MUST_NOT_READ` lists service secret paths. The executor refuses to start if it can
+  read any of them, or if it runs as root.
+- **Inherent:** the playbook can read the job's SSH key, certificate and vault password. It needs
+  them. Keep the certificate short (`FERRY_OPENBAO_SSH_TTL`) and its principal narrow.
+
+Why a second container rather than only a second user in the same one: switching users needs root
+or `CAP_SETUID` in the service's container, and the service's secret files would still sit on the
+same filesystem, guarded only by modes. A second container needs no privileges anywhere, and the
+secrets aren't there at all. It works the same in Kubernetes (a second container in the pod) and
+Nomad (a sidecar task, see `deploy/nomad`). A pod or job per run would also work, but the service
+would then need the right to create pods or submit jobs, which is a bigger grant than the one it
+protects. In the local lab, `deploy/local/lab.sh evil` and then `leakcheck` run a hostile plan and
+show what it got.
+
 ## GitHub
 
 `--vcs github` (or `FERRY_VCS=github`) uses `ferry.vcs.github.GitHubBackend` and `SQLiteLocks`:

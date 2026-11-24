@@ -41,6 +41,29 @@ case "${1:-help}" in
             git -C "$LAB/src" rev-parse HEAD > "$LAB/pr_head"
             pr_event synchronize pip; echo; wait_idle ;;
   close)    pr_event closed pip; echo; wait_idle ;;
+  evil)     # a hostile PR (passes the static policy): during the plan, on the controller, it tries the
+            # service's secret files, dumps its environment and every readable /proc/*/environ, and
+            # ships it all to the target with the job's certificate. Then `lab.sh leakcheck`.
+            git -C "$LAB/src" checkout -q feature
+            cp "$(dirname "$0")/evil.yml" "$LAB/src/evil.yml"
+            mkdir -p "$LAB/src/lookup_plugins" && cp "$(dirname "$0")/evil_lookup.py" "$LAB/src/lookup_plugins/loot.py"
+            grep -q evil.yml "$LAB/src/site.yml" || printf -- '- import_playbook: evil.yml\n' >> "$LAB/src/site.yml"
+            git -C "$LAB/src" add -A && git -C "$LAB/src" commit -qm "PR: totally normal change"
+            git -C "$LAB/src" push -q "$LAB/remote/acme/ansible.git" feature
+            git -C "$LAB/remote/acme/ansible.git" update-ref refs/pull/1/head "$(git -C "$LAB/src" rev-parse HEAD)"
+            git -C "$LAB/src" rev-parse HEAD > "$LAB/pr_head"
+            pr_event synchronize pip; echo; wait_idle ;;
+  leakcheck) # what the hostile plan got, without printing any secret
+            docker exec ferry-lab-target cat /tmp/ferry-leak > "$LAB/leak.txt"
+            grep -E '^(DENIED|READ|LOOKUP|JOBCRED|ID) ' "$LAB/leak.txt" || true
+            echo "env vars the playbook saw: $(sed -n '/^ENV$/,/^PROC$/p' "$LAB/leak.txt" | grep -c '=')"
+            echo "  of them FERRY_*: $(sed -n '/^ENV$/,/^PROC$/p' "$LAB/leak.txt" | grep -c '^FERRY_' || true)"
+            found=0
+            for s in "$(cat "$LAB/secrets/webhook-secret")" "$(cat "$LAB/jwt/nomad_openbao.jwt")" \
+                     "$(sed -n 2p "$LAB/secrets/app.pem")"; do
+              grep -qF -- "$s" "$LAB/leak.txt" && found=$((found + 1))
+            done
+            echo "service secrets found in what the playbook shipped out: $found of 3" ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;
