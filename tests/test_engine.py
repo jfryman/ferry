@@ -340,3 +340,60 @@ def test_a_closed_or_merged_pr_is_not_planned(env, state):
     assert locks.get("homelab") is None
     assert render.parse_markers(vcs.notes[1][-1].body) == [] or \
         all(k != "plan" for k, _ in render.parse_markers(vcs.notes[1][-1].body))
+
+
+# ---- #22: only PRs into the default branch (or ferry.yaml's base_branches) ----------------------
+
+def based(env, target="main", base_branches=None):
+    cfg, vcs, locks, clock, make = env
+    if base_branches is not None:
+        cfg.base_branches = base_branches
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml"], target=target)
+    vcs.approvals[1] = ["james"]
+
+    def eng(*runs):
+        e, runner = make(*runs)
+        e.default_branch = "main"
+        return e, runner
+    return cfg, vcs, locks, eng
+
+
+def test_a_pr_into_another_branch_is_not_planned(env):
+    cfg, vcs, locks, eng = based(env, target="feature-x")
+    e, runner = eng(clean_plan_run())
+    out = e.plan(1, SHA, "pip")
+    assert not out.ok and runner.requests == [] and locks.get("homelab") is None
+    assert any("`feature-x`" in r and "`main`" in r for r in out.reasons), out.reasons
+
+
+def test_a_pr_retargeted_after_its_plan_is_not_applied(env):
+    cfg, vcs, locks, eng = based(env)
+    e, _ = eng(clean_plan_run())
+    assert e.plan(1, SHA, "pip").ok
+    vcs.crs[1].target_branch = "feature-x"
+    e, runner = eng(clean_plan_run())
+    out = e.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert any("`feature-x`" in r for r in out.reasons)
+
+
+def test_an_allowed_extra_base_is_planned_and_applied(env):
+    cfg, vcs, locks, eng = based(env, target="release", base_branches=["release"])
+    e, _ = eng(clean_plan_run())
+    assert e.plan(1, SHA, "pip").ok
+    e, runner = eng(clean_plan_run())
+    out = e.apply(1, SHA, "james")
+    assert out.ok, out.reasons
+
+
+def test_base_branches_is_in_the_config_digest(repo):
+    a = config.load(repo / "ferry.yaml")
+    b = config.load(repo / "ferry.yaml")
+    b.base_branches = ["release"]
+    assert a.digest() != b.digest()
+
+
+def test_base_branches_must_be_a_list_of_names(repo):
+    (repo / "ferry.yaml").write_text("base_branches: release\n")
+    with pytest.raises(ValueError, match="base_branches"):
+        config.load(repo / "ferry.yaml")

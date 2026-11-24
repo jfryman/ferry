@@ -84,11 +84,12 @@ class World:
         )
 
     def mr_json(self):
-        return {"iid": 1, "sha": self.sha, "source_branch": "feature", "target_branch": "main",
+        return {"iid": 1, "sha": self.sha, "source_branch": "feature", "target_branch": self.target,
                 "author": {"username": self.author}, "state": "closed" if self.closed else "opened", "draft": False,
                 "detailed_merge_status": self.merge_status, "web_url": "https://gitlab.example.com/acme/ansible/-/merge_requests/1"}
 
     author = "bob"
+    target = "main"  # MR 1's target branch, as the API says
     closed = False  # what the API says about MR 1
 
     def _runner(self, checkout, marker, env):
@@ -108,6 +109,7 @@ class World:
     def mr_event(self, action="open", draft=False, fork=False, oldrev=None, changes=None, project=None, user="bob",
                  at=NOW_GL):
         attrs = {"iid": 1, "action": action, "draft": draft, "source_project_id": 7 if fork else 9,
+                 "target_branch": self.target,
                  "target_project_id": 9, "last_commit": {"id": self.sha}, "author_id": 2, "updated_at": at}
         if oldrev:
             attrs["oldrev"] = oldrev
@@ -566,3 +568,41 @@ def test_a_plan_queued_before_the_mr_closed_runs_nothing(world, monkeypatch):
     [result] = world.drain()
     assert result["result"] == "skipped" and not minted and not world.runner.requests
     assert world.locks.get("homelab") is None
+
+
+# ---- #22: target branch -----------------------------------------------------------------------------
+
+def test_an_mr_into_another_branch_is_not_planned(world, monkeypatch):
+    from test_service import count_credentials
+    minted = count_credentials(monkeypatch)
+    world.target = "feature-x"
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert not minted and not world.runner.requests and world.locks.get("homelab") is None
+
+
+@pytest.mark.parametrize("command", ["/ferry plan", "/ferry apply"])
+def test_commands_on_an_mr_into_another_branch_are_refused(world, monkeypatch, command):
+    from test_service import count_credentials
+    minted = count_credentials(monkeypatch)
+    world.target = "feature-x"
+    world.deliver("Note Hook", world.note_event(command))
+    world.drain()
+    assert not minted and not world.runner.requests
+    assert "`feature-x`" in world.notes[-1]["body"]
+
+
+def test_an_mr_retargeted_after_its_plan_is_not_applied(world, monkeypatch):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    minted = count_credentials_gl(monkeypatch)
+    world.target = "feature-x"
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    world.deliver("Note Hook", world.note_event("/ferry apply"))
+    [result] = world.drain()
+    assert not result["ok"] and not minted and len(world.runner.requests) == 1
+
+
+def count_credentials_gl(monkeypatch):
+    from test_service import count_credentials
+    return count_credentials(monkeypatch)

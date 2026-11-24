@@ -78,7 +78,8 @@ def build_engine(args, need_vcs: bool = True) -> Engine:
         client = GitLabClient(api, token)
         vcs = GitLabBackend(client, project)
         locks = GitLabTagLocks(client, project)
-    return Engine(cfg, repo, runner, vcs, locks, job_url=_env("CI_JOB_URL", "") or "")
+    return Engine(cfg, repo, runner, vcs, locks, job_url=_env("CI_JOB_URL", "") or "",
+                  default_branch=_env("FERRY_DEFAULT_BRANCH") or _env("CI_DEFAULT_BRANCH"))
 
 
 def _mr_args(args) -> tuple[int, str, str]:

@@ -1,8 +1,7 @@
 """A stand-in for api.github.com: just enough for ferry serve and one PR (number 1).
 
 State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_pr_state
-{"state": "closed"|"open"} closes or reopens the PR, /_head sets the
-PR head SHA (after you push to the PR branch). The branch has one ruleset (one approving review);
+{"state": "closed"|"open"} closes or reopens the PR, /_pr {"base": NAME} retargets it. The branch has one ruleset (one approving review);
 POST /_rules {"rules": [...]} replaces its rules (GitHub's /rules/branches shape), e.g. to require
 two approvals and watch apply refuse. Run with the ferry image's Python.
 """
@@ -15,7 +14,7 @@ R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
 WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip").split(","))
 # Like a fresh repo with one ruleset: one approving review on main.
-state = {"comments": [], "reviews": [], "pr_state": "open",
+state = {"comments": [], "reviews": [], "pr_state": "open", "base": "main",
          "rules": [{"type": "pull_request", "ruleset_id": 1,
                     "parameters": {"required_approving_review_count": 1}}]}
 
@@ -44,7 +43,7 @@ def gql_pr():
 
 def pr():
     return {"number": 1, "head": {"sha": head(), "ref": "feature", "repo": {"full_name": REPO}},
-            "base": {"ref": "main"}, "user": {"login": "pip"}, "state": state["pr_state"], "merged": False,
+            "base": {"ref": state["base"]}, "user": {"login": "pip"}, "state": state["pr_state"], "merged": False,
             "draft": False, "mergeable": True, "mergeable_state": "clean", "html_url": "http://lab/pull/1"}
 
 
@@ -103,6 +102,11 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/_pr_state":  # {"state": "closed"} before a close webhook, "open" to reopen
             state["pr_state"] = d.get("state", "open")
             return self._j(200, {"state": state["pr_state"]})
+        if self.path == "/_pr":  # {"base": "feature-x"}: retarget the PR
+            for k in ("base",):
+                if k in d:
+                    state[k] = d[k]
+            return self._j(200, {k: state[k] for k in ("base",)})
         if self.path == "/_approve":
             state["reviews"].append({"user": {"login": d.get("user", "james")}, "state": "APPROVED",
                                      "commit_id": head()})

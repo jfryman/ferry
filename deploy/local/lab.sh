@@ -16,7 +16,7 @@ deliver() {  # deliver EVENT BODY [DELIVERY-ID]; keeps the last one in $LAB/last
     -H "X-Hub-Signature-256: $sig" -H "Content-Type: application/json" --data-binary "$2"
 }
 pr_event() {  # pr_event ACTION AUTHOR
-  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"pull_request\":{\"number\":1,\"draft\":false,\"updated_at\":\"$(now)\",\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
+  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"pull_request\":{\"number\":1,\"draft\":false,\"base\":{\"ref\":\"${BASE:-main}\"},\"updated_at\":\"$(now)\",\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
 }
 comment() {  # comment USER BODY
   deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"$1\"},\"body\":\"$2\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
@@ -83,6 +83,15 @@ case "${1:-help}" in
             expect closed-plan "refused: PR is closed" "$out"
             expect closed-plan-note "is closed" "$(last_comment)"
             curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null ;;
+  base-branch) # #22: a PR into a branch other than main is neither planned nor applied
+            curl -s -X POST localhost:18999/_pr -d '{"base":"feature-x"}' >/dev/null
+            n=$(curl -s localhost:18999/_state | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["comments"]))')
+            BASE=feature-x pr_event synchronize pip >/dev/null; wait_idle >/dev/null
+            m=$(curl -s localhost:18999/_state | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["comments"]))')
+            expect base-branch-autoplan "^0$" "$((m - n))"
+            comment james "/ferry plan" >/dev/null; wait_idle >/dev/null
+            expect base-branch-plan "targets .feature-x." "$(last_comment)"
+            curl -s -X POST localhost:18999/_pr -d '{"base":"main"}' >/dev/null ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;
