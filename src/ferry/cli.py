@@ -476,7 +476,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--service", default=_env("FERRY_SERVICE_URL", "https://ferry.example.com"))
     s.add_argument("--token-command", default=_env("FERRY_RUN_TOKEN_COMMAND",
                    "bao read -field=token identity/oidc/token/ferry"))
-    s.add_argument("--insecure-http", action="store_true", help="throwaway lab only: HTTP and no host key checking")
+    s.add_argument("--insecure-http", action="store_true", help="throwaway lab only: plain HTTP to the service")
+    s.add_argument("--no-host-key-checking", action="store_true",
+                   help="throwaway lab only: don't check SSH host keys (separate from --insecure-http)")
 
     sub.add_parser("serve", help="webhook service (GitHub App or GitLab)", description=SERVE_HELP,
                    formatter_class=argparse.RawDescriptionHelpFormatter)

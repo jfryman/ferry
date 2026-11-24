@@ -13,6 +13,7 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
 - CLI certificates ask OpenBao for a short TTL (`FERRY_RUN_CERT_TTL`, default 15m) and are
   refused if they come back longer (#53).
+- `--insecure-http` no longer turns off SSH host-key checking; that is `--no-host-key-checking` (#54).
 - `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
   entries and empty group claims never match.
 
