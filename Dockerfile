@@ -11,7 +11,11 @@ RUN pip install --no-cache-dir "/src[service]" "ansible-core~=2.20.0" \
  && rm -rf /src
 
 # Not root: ferry needs no local privileges. It logs in to hosts with a per-job SSH certificate.
-RUN useradd --uid 10001 --create-home --home-dir /var/lib/ferry ferry
+# ferry-run runs the playbooks (`ferry executor`, normally its own container): a different user, so a
+# playbook can't read or write what the service owns.
+RUN useradd --uid 10001 --create-home --home-dir /var/lib/ferry ferry \
+ && useradd --uid 10002 --create-home --home-dir /home/ferry-run ferry-run \
+ && chmod 0755 /var/lib/ferry  # the executor reaches the work dir through it; secrets never live here
 USER ferry
 WORKDIR /var/lib/ferry
 ENV FERRY_WORKDIR=/var/lib/ferry/work \

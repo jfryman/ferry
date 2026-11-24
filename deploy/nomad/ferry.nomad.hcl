@@ -10,8 +10,8 @@ job "ferry" {
       port "http" { to = 8080 }
     }
 
-    # Persistent: the lock file (state/) and the collections cache (work/collections). Losing it
-    # frees every lock, so keep it on a host volume, not the alloc dir.
+    # Persistent: the lock file (state/). Losing it frees every lock, so keep it on a host volume,
+    # not the alloc dir. Only the ferry task mounts it; the executor never sees it.
     volume "ferry" {
       type      = "host"
       source    = "ferry"
@@ -38,6 +38,7 @@ job "ferry" {
         image = "ghcr.io/jfryman/ferry:0.2.0"
         ports = ["http"]
       }
+      user = "10001"
 
       volume_mount {
         volume      = "ferry"
@@ -54,6 +55,10 @@ job "ferry" {
       }
 
       env {
+        # Checkouts and the executor's socket live in the alloc dir, which both tasks see at /alloc.
+        # Files there belong to ferry (10001); the executor (10002) can read them, not change them.
+        FERRY_WORKDIR                     = "${NOMAD_ALLOC_DIR}/work"
+        FERRY_EXECUTOR_SOCKET             = "${NOMAD_ALLOC_DIR}/run/executor.sock"
         FERRY_GITHUB_REPO                 = "OWNER/ansible"
         FERRY_GITHUB_APP_ID               = "000000"
         FERRY_GITHUB_APP_KEY_FILE         = "${NOMAD_SECRETS_DIR}/app.pem"
@@ -76,6 +81,37 @@ job "ferry" {
         destination = "${NOMAD_SECRETS_DIR}/webhook-secret"
         perms       = "0400"
         data        = "{{ with secret \"kvv2/data/ferry\" }}{{ .Data.data.webhook_secret }}{{ end }}"
+      }
+
+      resources {
+        cpu    = 200
+        memory = 256
+      }
+    }
+
+    # The playbooks run here, as another user, with none of the service's secrets: no identity, no
+    # templates, no host volume. A plan's playbook (lookups, check_mode: false tasks, plugins) can
+    # read only its own job's SSH certificate and vault password, which the service sends per job.
+    task "executor" {
+      driver = "docker"
+      user   = "10002"
+
+      lifecycle {
+        hook    = "prestart"
+        sidecar = true
+      }
+
+      config {
+        image   = "ghcr.io/jfryman/ferry:0.2.0"
+        command = "executor"
+      }
+
+      env {
+        FERRY_WORKDIR                = "${NOMAD_ALLOC_DIR}/work"
+        FERRY_EXECUTOR_SOCKET        = "${NOMAD_ALLOC_DIR}/run/executor.sock"
+        # Refuse to start if the separation is broken.
+        FERRY_EXECUTOR_MUST_NOT_READ = "/var/lib/ferry/state/locks.db"
+        ANSIBLE_HOST_KEY_CHECKING    = "True" # and mount your known_hosts at /etc/ssh/ssh_known_hosts
       }
 
       resources {

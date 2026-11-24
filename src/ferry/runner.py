@@ -1,6 +1,7 @@
 """Run ansible-playbook and collect ferry_events results.
 
-The Runner protocol is the seam for tests (FakeRunner) and for a future remote executor.
+The Runner protocol is the seam for tests (FakeRunner) and for the executor (executor.py), which
+runs ansible-playbook as a separate, unprivileged user that can't read the service's secrets.
 """
 
 from __future__ import annotations
@@ -12,12 +13,17 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Iterable, Protocol
 
 from .results import RunResult, parse_file
 
 PLUGIN_DIR = Path(__file__).parent / "ansible" / "callback_plugins"
 PLAYBOOK_DIR = Path(__file__).parent / "ansible" / "playbooks"
+
+# Set by job_credentials: the per-job credentials directory. For the runner only, never ansible's.
+CREDS_DIR_ENV = "FERRY_CREDS_DIR"
+# The service's own secrets, if given as environment variables: never inherited by ansible.
+SERVICE_SECRET_ENV = ("FERRY_WEBHOOK_SECRET", "FERRY_GITLAB_TOKEN", "FERRY_GITHUB_TOKEN")
 
 
 @dataclass
@@ -35,7 +41,24 @@ class Runner(Protocol):
     def run(self, req: RunRequest) -> RunResult: ...
 
 
+def ferry_ansible_env(base: dict[str, str], events_file: str) -> dict[str, str]:
+    """The settings ferry needs in every run: its events callback, no colour, no retry files."""
+    enabled = [c for c in base.get("ANSIBLE_CALLBACKS_ENABLED", "").split(",") if c]
+    return {
+        "FERRY_EVENTS_FILE": events_file,
+        "ANSIBLE_CALLBACK_PLUGINS": os.pathsep.join(
+            p for p in [str(PLUGIN_DIR), base.get("ANSIBLE_CALLBACK_PLUGINS", "")] if p),
+        "ANSIBLE_CALLBACKS_ENABLED": ",".join(enabled + ["ferry_events"]),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_RETRY_FILES_ENABLED": "0",
+    }
+
+
 class AnsibleRunner:
+    """Runs ansible-playbook as a child of this process: same user, same files. Fine for the CI
+    driver and for a service without secrets worth separating; the service otherwise uses
+    executor.ExecutorRunner."""
+
     def __init__(self, repo_dir: str | Path, busy_marker: str, ansible_playbook: str = "ansible-playbook",
                  env: dict[str, str] | None = None, timeout: float | None = None,
                  echo: "Callable[[str], str | None] | None" = None):
@@ -51,8 +74,8 @@ class AnsibleRunner:
         # echo goes to the service log, not a CI job log).
         self.echo = echo
 
-    def command(self, req: RunRequest) -> list[str]:
-        cmd = [self.bin, "-i", req.inventory, req.playbook]
+    def args(self, req: RunRequest) -> list[str]:
+        cmd = ["-i", req.inventory, req.playbook]
         if req.limit:
             cmd += ["--limit", req.limit]
         if req.check:
@@ -63,24 +86,29 @@ class AnsibleRunner:
             cmd += ["-e", f"@{req.extra_vars_file}"]
         return cmd
 
+    def command(self, req: RunRequest) -> list[str]:
+        return [self.bin, *self.args(req)]
+
+    def job_env(self, req: RunRequest) -> dict[str, str]:
+        """The job's own variables: credentials and request extras, without the runner-only ones."""
+        env = {**self.env, **req.extra_env}
+        env.pop(CREDS_DIR_ENV, None)
+        return env
+
+    def _collect(self, lines: Iterable[str], tail: list[str]) -> None:
+        for line in lines:
+            shown = self.echo(line) if self.echo else line
+            print(shown or "", end="", flush=True)  # the human log stays in the CI job output
+            tail.append(line)
+            if len(tail) > 40:
+                tail.pop(0)
+
     def run(self, req: RunRequest) -> RunResult:
         with tempfile.TemporaryDirectory(prefix="ferry-") as tmp:
             events = Path(tmp) / "events.jsonl"
-            env = dict(os.environ)
-            enabled = [c for c in env.get("ANSIBLE_CALLBACKS_ENABLED", "").split(",") if c]
-            env.update(
-                {
-                    "FERRY_EVENTS_FILE": str(events),
-                    "ANSIBLE_CALLBACK_PLUGINS": os.pathsep.join(
-                        p for p in [str(PLUGIN_DIR), env.get("ANSIBLE_CALLBACK_PLUGINS", "")] if p
-                    ),
-                    "ANSIBLE_CALLBACKS_ENABLED": ",".join(enabled + ["ferry_events"]),
-                    "ANSIBLE_NOCOLOR": "1",
-                    "ANSIBLE_RETRY_FILES_ENABLED": "0",
-                }
-            )
-            env.update(self.env)
-            env.update(req.extra_env)
+            env = {k: v for k, v in os.environ.items() if k not in SERVICE_SECRET_ENV}
+            env.update(ferry_ansible_env(env, str(events)))
+            env.update(self.job_env(req))
             proc = subprocess.Popen(
                 self.command(req),
                 cwd=self.repo_dir,
@@ -106,12 +134,7 @@ class AnsibleRunner:
             tail: list[str] = []
             assert proc.stdout is not None
             try:
-                for line in proc.stdout:
-                    shown = self.echo(line) if self.echo else line
-                    print(shown or "", end="", flush=True)  # the human log stays in the CI job output
-                    tail.append(line)
-                    if len(tail) > 40:
-                        tail.pop(0)
+                self._collect(proc.stdout, tail)
                 rc = proc.wait()
             finally:
                 if timer:

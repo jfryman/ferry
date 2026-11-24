@@ -48,12 +48,25 @@ def test_job_gets_a_signed_key_token_and_vault_password_then_everything_goes(set
         assert open(key + "-cert.pub").read().startswith("ssh-ed25519-cert-v01@openssh.com")
         assert open(env["ANSIBLE_VAULT_PASSWORD_FILE"]).read() == "hunter2"
         assert stat.S_IMODE(os.stat(env["ANSIBLE_VAULT_PASSWORD_FILE"]).st_mode) == 0o600
-        assert env["VAULT_TOKEN"] == env["ANSIBLE_HASHI_VAULT_TOKEN"] == "s.job"
-        assert env["VAULT_CACERT"] == "/ca.pem" and env["ANSIBLE_REMOTE_USER"] == "root"
+        # The playbook gets no OpenBao token: it's revoked before the job's playbooks run.
+        assert not {"VAULT_TOKEN", "ANSIBLE_HASHI_VAULT_TOKEN", "VAULT_CACERT"} & set(env)
+        assert "s.job" not in env.values()
+        assert fake.calls[-1][1] == "auth/token/revoke-self"
+        assert env["ANSIBLE_REMOTE_USER"] == "root" and env["FERRY_CREDS_DIR"] == tmp
         assert "IdentitiesOnly=yes" in env["ANSIBLE_SSH_ARGS"]
         # SSH connection sharing is per job, never reused by the next job.
         assert env["ANSIBLE_SSH_CONTROL_PATH_DIR"].startswith(tmp + os.sep)
     assert not os.path.exists(tmp)
+    assert [c[1] for c in fake.calls].count("auth/token/revoke-self") == 1
+
+
+def test_playbook_token_is_opt_in_and_revoked_after_the_job(settings):
+    settings.playbook_token = True
+    fake = FakeBao()
+    with job_credentials(OpenBao(settings, fake)) as env:
+        assert env["VAULT_TOKEN"] == env["ANSIBLE_HASHI_VAULT_TOKEN"] == "s.job"
+        assert env["VAULT_CACERT"] == "/ca.pem"
+        assert not any(c[1] == "auth/token/revoke-self" for c in fake.calls)
     assert fake.calls[-1][1] == "auth/token/revoke-self"
 
 

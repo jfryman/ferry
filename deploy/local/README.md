@@ -78,6 +78,13 @@ Each `lab.sh` command delivers what GitHub would, then waits for ferry's job and
 docker logs ferry-lab-target 2>&1 | grep Accepted | sed -E 's/.*serial ([0-9]+).*/serial=\1/' | sort | uniq -c
 ```
 
+## A hostile plan can't read the service's secrets
+
+The playbooks run in a separate container, `ferry-lab-executor`: user `ferry-run`, none of the service's secrets mounted, the work dir read-only. See "Playbooks run apart from the service" in the top-level README.
+
+- **`lab.sh evil`**: pushes a change that gets past the static policy. It uses file lookups plus a lookup plugin shipped in the repo, which runs on the controller during the *plan*. The plugin tries the App key, the webhook secret, the workload JWT and the lock file, dumps its environment and every `/proc/*/environ`, and copies everything to the target with the job's own certificate.
+- **`lab.sh leakcheck`**: shows what it got, without printing any secret. Every service secret path is `DENIED (FileNotFoundError)`, the playbook ran as `uid=10002`, there's no `VAULT_TOKEN` and no service variable in its environment, and `service secrets found ...: 0 of 3`. It can read the job's own key and vault password. That's inherent: the playbook needs them. Checked Nov 24.
+
 ## Things worth trying (and what to look for)
 
 - **Certificate limits:**

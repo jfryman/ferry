@@ -50,6 +50,10 @@ class OpenBaoSettings:
     # its revoked token (revoking a token doesn't revoke a cert), so keep it close to the job timeout.
     ssh_ttl: str | None = None  # e.g. "20m"; None: the role's default ttl
     ssh_principal: str | None = None  # valid_principals to request; None: the role's default_user
+    # Hand the job's OpenBao token to the playbook (VAULT_TOKEN, for community.hashi_vault lookups).
+    # Off by default: that token can sign more SSH certificates until it expires, so without it the
+    # token is revoked as soon as the job's credentials are fetched, before any playbook runs.
+    playbook_token: bool = False
 
 
 def urllib_transport_for(ca_cert: str | None) -> Transport:
@@ -134,6 +138,8 @@ def job_credentials(bao: OpenBao | None, ssh_user: str | None = None,
         cert = bao.sign_ssh_key(token, (tmp / "id_ed25519.pub").read_text())
         (tmp / "id_ed25519-cert.pub").write_text(cert.strip() + "\n")
         env = {
+            # For the runner: the executor gets these files' contents (executor.py).
+            "FERRY_CREDS_DIR": str(tmp),
             # ssh finds id_ed25519-cert.pub next to the key on its own.
             "ANSIBLE_PRIVATE_KEY_FILE": str(key),
             "ANSIBLE_SSH_ARGS": "-o IdentitiesOnly=yes -o ControlMaster=auto -o ControlPersist=30s",
@@ -141,15 +147,14 @@ def job_credentials(bao: OpenBao | None, ssh_user: str | None = None,
             # job would reuse this job's still-open master connection, i.e. run under this job's
             # certificate after its credentials were gone (found in the local lab, Nov 23).
             "ANSIBLE_SSH_CONTROL_PATH_DIR": str(tmp / "cp"),
-            # For lookups (community.hashi_vault reads these).
-            "VAULT_ADDR": bao.s.addr,
-            "VAULT_TOKEN": token,
-            "ANSIBLE_HASHI_VAULT_ADDR": bao.s.addr,
-            "ANSIBLE_HASHI_VAULT_TOKEN": token,
         }
-        if bao.s.ca_cert:
-            env["VAULT_CACERT"] = bao.s.ca_cert
-            env["ANSIBLE_HASHI_VAULT_CA_CERT"] = bao.s.ca_cert
+        if bao.s.playbook_token:
+            # For lookups (community.hashi_vault reads these).
+            env.update({"VAULT_ADDR": bao.s.addr, "VAULT_TOKEN": token,
+                        "ANSIBLE_HASHI_VAULT_ADDR": bao.s.addr, "ANSIBLE_HASHI_VAULT_TOKEN": token})
+            if bao.s.ca_cert:
+                env["VAULT_CACERT"] = bao.s.ca_cert
+                env["ANSIBLE_HASHI_VAULT_CA_CERT"] = bao.s.ca_cert
         if ssh_user:
             env["ANSIBLE_REMOTE_USER"] = ssh_user
         if bao.s.vault_password_path:
@@ -157,6 +162,9 @@ def job_credentials(bao: OpenBao | None, ssh_user: str | None = None,
             pw.write_text(bao.read_field(token, bao.s.vault_password_path, bao.s.vault_password_field))
             os.chmod(pw, 0o600)
             env["ANSIBLE_VAULT_PASSWORD_FILE"] = str(pw)
+        if not bao.s.playbook_token:
+            bao.revoke(token)  # everything is fetched: no playbook ever runs while it's valid
+            token = None
         yield env
     finally:
         if token:
