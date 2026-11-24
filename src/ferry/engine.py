@@ -18,7 +18,7 @@ from .locks import LockStore, new_lock
 from .results import RunResult
 from .runner import PLAYBOOK_DIR, RunRequest, Runner
 from .sanitize import Redactor
-from .vcs.base import VCSBackend
+from .vcs.base import VCSBackend, is_not_found
 
 
 @dataclass
@@ -85,12 +85,19 @@ class Engine:
         held = self.locks.try_acquire(lock)
         if held is None or held.holder == cr_id:
             return None
-        # Stale if the holder MR isn't open any more: take it over.
+        # Stale if the holder MR isn't open any more: take it over. Only a definite answer counts:
+        # closed/merged, or a 404/410 for a deleted one. Any other error (timeout, 5xx, rate limit,
+        # expired token) keeps the holder's lock: the lock is what stops two changes interleaving.
         stale = False
         if held.holder and self.vcs is not None:
             try:
                 stale = not self.vcs.get_change_request(held.holder).open
-            except Exception:  # holder MR deleted
+            except Exception as e:
+                if not is_not_found(e):
+                    status = getattr(e, "status", None)
+                    return (f"inventory `{inventory}` is locked by !{held.holder}, and ferry couldn't check "
+                            f"whether !{held.holder} is still open ({type(e).__name__}"
+                            + (f", HTTP {status}" if status else "") + "); try again")
                 stale = True
         if stale:
             self.locks.release(inventory, held.holder)
@@ -119,6 +126,11 @@ class Engine:
     def plan(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome:
         assert self.vcs is not None
         inv = self.cfg.inventory(inventory)
+        # A closed or merged MR never sends another close event, so a lock it took would never be
+        # released, and nobody can merge what the plan is for: refuse, as for apply.
+        cr = self.vcs.get_change_request(cr_id)
+        if not cr.open:
+            return self._refuse("plan", cr_id, inv.name, sha, [f"MR is {cr.state}: ferry only plans open MRs"])
         violations = self.policy_check()
         if violations:
             return self._refuse("plan", cr_id, inv.name, sha, ["policy check failed:"] + violations)

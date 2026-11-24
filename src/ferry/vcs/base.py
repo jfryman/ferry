@@ -9,6 +9,16 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 
+class NotFound(LookupError):
+    """The code host says the object doesn't exist (HTTP 404/410)."""
+
+
+def is_not_found(error: BaseException) -> bool:
+    """Only a definite "doesn't exist" from the code host. Timeouts, 5xx, rate limits and auth
+    errors are not: callers that would give something away on "gone" must fail closed on those."""
+    return isinstance(error, NotFound) or getattr(error, "status", None) in (404, 410)
+
+
 @dataclass
 class ChangeRequest:
     """A merge request / pull request."""

@@ -127,6 +127,10 @@ class HeadMoved(Exception):
     """A pinned job's PR head isn't the commit the comment was about any more."""
 
 
+class NotOpen(Exception):
+    """The PR was closed or merged before the job ran."""
+
+
 @dataclass
 class Job:
     action: str  # plan | apply | unlock | drift
@@ -296,10 +300,20 @@ class Service:
             self.vcs.post_note(number, f"`/ferry {action}` needs write access to this repo; @{user} doesn't have it.")
             return 202, f"{action} refused: no write access"
         cr = self.vcs.get_change_request(number)
+        if not self._open_or_say(cr, action):
+            return 202, f"{action} refused: {self.noun} is {cr.state}"
         sha = self._pin_head(cr, action, parse_time(p["comment"]["created_at"]), named)
         if sha is None:
             return 202, f"{action} refused: the head isn't the one commented on"
         return self._enqueue(Job(action, number, sha, user, inventory, delivery, pinned=True))
+
+    def _open_or_say(self, cr, action: str) -> bool:
+        """Commands run on open PRs only (as Atlantis): a closed one never sends another close event,
+        so a plan's lock would never be released."""
+        if cr.open:
+            return True
+        self.vcs.post_note(cr.id, f"`/ferry {action}` didn't run: this {self.noun} is {cr.state}.")
+        return False
 
     def _head_since(self, number: int, sha: str) -> float | None:
         """When `sha` became the head of `number` (GitHub: from the pull_request events ferry got)."""
@@ -365,6 +379,10 @@ class Service:
         except HeadMoved as e:
             result.update(error=str(e), skipped=True)
             self._report_moved(job, str(e))
+        except NotOpen as e:
+            result.update(error=str(e), skipped=True)
+            if job.pinned:
+                self._report_not_run(job, f"{e}. Nothing ran against the hosts.")
         except Exception as e:  # report on the PR, keep the service up
             result["error"] = f"{type(e).__name__}: {e}"
             log.exception("job %s for #%s failed", job.action, job.pr)
@@ -415,15 +433,21 @@ class Service:
                       clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved")
 
     def _report_moved(self, job: Job, why: str) -> None:
+        self._report_not_run(job, f"{why}. Nothing ran against the hosts. Read the new commits, then "
+                                  f"comment `/ferry {job.action}` again.")
+
+    def _report_not_run(self, job: Job, text: str) -> None:
         try:
-            self.vcs.post_note(job.pr, f"### ferry {job.action}: not run\n\n{why}. Nothing ran against the "
-                                       f"hosts. Read the new commits, then comment `/ferry {job.action}` again.")
+            self.vcs.post_note(job.pr, f"### ferry {job.action}: not run\n\n{text}")
         except Exception:
             log.exception("couldn't report on #%s", job.pr)
 
     def _plan_or_apply(self, job: Job) -> dict:
+        cr = self.vcs.get_change_request(job.pr)
+        if not cr.open:  # closed while queued: no checkout, no credentials, no lock
+            raise NotOpen(f"the {self.noun} is {cr.state}")
         if job.pinned:
-            head = self.vcs.get_change_request(job.pr).head_sha
+            head = cr.head_sha
             if head != job.sha:
                 raise HeadMoved(f"the {self.noun} head moved from `{job.sha[:12]}` to `{head[:12]}` "
                                 f"after the `/ferry {job.action}` comment")

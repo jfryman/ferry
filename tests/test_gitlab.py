@@ -222,3 +222,32 @@ def test_webhook_token_and_trigger(gl):
     assert pid == 99
     sent = fake.calls[-1][2]
     assert sent["ref"] == "feat" and sent["variables"] == {"FERRY_ACTION": "apply", "FERRY_MR_IID": "4", "FERRY_USER": "james"}
+
+
+@pytest.mark.parametrize("status, taken", [(500, False), (429, False), (401, False), (404, True)])
+def test_lock_holder_lookup_errors_through_the_real_client(repo, tmp_path, status, taken):
+    """#21 on GitLab: only a definite 404 for the holder MR gives its lock away."""
+    from ferry import config
+    from ferry.engine import Engine
+    from ferry.locks import SQLiteLocks
+    from ferry.sanitize import Redactor
+    from fakes import FakeRunner, ev_stats
+
+    fake = FakeGitLab()
+    be = GitLabBackend(GitLabClient(API, "tok", transport=fake), "infra/ansible")
+    p = "/projects/infra%2Fansible/merge_requests"
+    fake.routes[("GET", f"{p}/1")] = {"iid": 1, "sha": "a" * 40, "source_branch": "f", "target_branch": "main",
+                                      "author": {"username": "bob"}, "state": "opened",
+                                      "detailed_merge_status": "mergeable"}
+    fake.routes[("GET", f"{p}/2")] = lambda url, d: (status, {"message": "x"})
+    fake.routes[("GET", f"{p}/1/diffs")] = [{"old_path": "inventories/homelab/host_vars/dns-1.yml",
+                                             "new_path": "inventories/homelab/host_vars/dns-1.yml"}]
+    fake.routes[("POST", f"{p}/1/notes")] = lambda url, d: (201, {"id": 1, "author": {"username": "b"},
+                                                                  "body": d["body"]})
+    cfg = config.load(repo / "ferry.yaml")
+    locks = SQLiteLocks(tmp_path / "locks.db")
+    locks.try_acquire(new_lock("homelab", 2, "b" * 40, "james"))
+    runner = FakeRunner(([ev_stats()], 0))
+    out = Engine(cfg, repo, runner, be, locks, Redactor([], [], [], environ={}), lambda: 1.0).plan(1, "a" * 40, "bob")
+    assert out.ok is taken
+    assert locks.get("homelab").holder == (1 if taken else 2)

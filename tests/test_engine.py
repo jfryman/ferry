@@ -256,3 +256,87 @@ def test_drift_writes_metrics_for_reachable_hosts_only(env, tmp_path):
     assert report.playbook.endswith("drift_report.yml")
     prom = (tmp_path / "out/drift.prom").read_text()
     assert 'ansible_drift_host_state{inventory="homelab",host="voron",state="blocked"} 1' in prom
+
+
+# ---- #21: the lock fails closed; closed PRs aren't planned ------------------------------------
+
+from ferry.vcs.base import NotFound  # noqa: E402
+from ferry.vcs.github import GitHubError  # noqa: E402
+from ferry.vcs.gitlab import GitLabError  # noqa: E402
+
+
+def held_by_2(env, **cr2):
+    cfg, vcs, locks, clock, make = env
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml"])
+    vcs.add_cr(2, SHA2, files=["inventories/homelab/host_vars/dns-1.yml"], **cr2)
+    locks.try_acquire(new_lock("homelab", 2, SHA2, "james"))
+    return cfg, vcs, locks, clock, make
+
+
+@pytest.mark.parametrize("error", [
+    GitHubError(500, "GET", "/pulls/2", "boom"),
+    GitHubError(403, "GET", "/pulls/2", "rate limit exceeded"),
+    GitHubError(401, "GET", "/pulls/2", "Bad credentials"),
+    GitLabError(502, "GET", "/merge_requests/2", "bad gateway"),
+    TimeoutError("timed out"),
+    ConnectionResetError("reset"),
+    RuntimeError("anything else"),
+])
+def test_an_error_reading_the_lock_holder_refuses_and_keeps_the_lock(env, error):
+    cfg, vcs, locks, clock, make = held_by_2(env)
+    vcs.lookup_errors[2] = error
+    eng, runner = make(clean_plan_run())
+    out = eng.plan(1, SHA, "pip")
+    assert not out.ok and runner.requests == []
+    assert any("couldn't check whether !2" in r for r in out.reasons), out.reasons
+    held = locks.get("homelab")
+    assert (held.holder, held.sha) == (2, SHA2)
+    assert "boom" not in vcs.notes[1][-1].body  # the API's error text isn't posted
+
+
+def test_an_error_reading_the_lock_holder_refuses_apply_too(env):
+    cfg, vcs, locks, clock, make = env
+    planned(env)
+    locks.release("homelab", 1)
+    vcs.add_cr(2, SHA2, files=["inventories/homelab/host_vars/dns-1.yml"])
+    locks.try_acquire(new_lock("homelab", 2, SHA2, "james"))
+    vcs.lookup_errors[2] = GitHubError(503, "GET", "/pulls/2", "unavailable")
+    eng, runner = make(clean_plan_run())
+    out = eng.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert locks.get("homelab").holder == 2
+
+
+@pytest.mark.parametrize("error", [
+    NotFound("gone"),
+    GitHubError(404, "GET", "/pulls/2", "Not Found"),
+    GitHubError(410, "GET", "/pulls/2", "Gone"),
+    GitLabError(404, "GET", "/merge_requests/2", "404 Not found"),
+])
+def test_a_deleted_lock_holder_is_taken_over(env, error):
+    cfg, vcs, locks, clock, make = held_by_2(env)
+    vcs.lookup_errors[2] = error
+    eng, _ = make(clean_plan_run())
+    assert eng.plan(1, SHA, "pip").ok
+    assert locks.get("homelab").holder == 1
+
+
+@pytest.mark.parametrize("state", ["closed", "merged"])
+def test_a_closed_or_merged_lock_holder_is_taken_over(env, state):
+    cfg, vcs, locks, clock, make = held_by_2(env, state=state)
+    eng, _ = make(clean_plan_run())
+    assert eng.plan(1, SHA, "pip").ok
+    assert locks.get("homelab").holder == 1
+
+
+@pytest.mark.parametrize("state", ["closed", "merged"])
+def test_a_closed_or_merged_pr_is_not_planned(env, state):
+    cfg, vcs, locks, clock, make = env
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml"], state=state)
+    eng, runner = make(clean_plan_run())
+    out = eng.plan(1, SHA, "pip")
+    assert not out.ok and runner.requests == []
+    assert any(f"is {state}" in r for r in out.reasons)
+    assert locks.get("homelab") is None
+    assert render.parse_markers(vcs.notes[1][-1].body) == [] or \
+        all(k != "plan" for k, _ in render.parse_markers(vcs.notes[1][-1].body))
