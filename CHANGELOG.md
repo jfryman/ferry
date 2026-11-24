@@ -27,6 +27,10 @@ webhook jobs (#50, #52). It's a break-glass path: no PR, review or approval. The
 - Lab scenarios for operator check/apply, unmerged apply, denied identity, contention and lease expiry.
 
 ### Security
+- **Upgrade from 0.1.x:** approvals in 0.1.x weren't head-aware. Any approval counted, even one
+  given before a later push, so a change could be applied with commits nobody approved. Head-aware
+  approvals landed in 0.2.0 (#5); 0.3.0 also stopped counting approvals from the PR's pushers (#25,
+  #43). Anyone still on 0.1.x, including CI pins, should upgrade.
 - **An apply must be the default-branch head** (#58): the service refuses (409) a `--apply`
   whose SHA isn't the head it fetched, so operators apply only merged code. Check mode may name any
   published SHA. Empty allow-list entries and empty group claims never match.
