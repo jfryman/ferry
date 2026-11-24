@@ -5,4 +5,4 @@ webhook service is another (ferry.webhook). VCS access goes through ferry.vcs.ba
 locking through ferry.locks.LockStore, so new backends slot in without touching the engine.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
