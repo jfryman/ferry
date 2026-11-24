@@ -44,6 +44,7 @@ class Engine:
         job_url: str = "",
         apply_how: str | None = None,
         default_branch: str | None = None,
+        marker_key: bytes | None = None,
     ):
         self.cfg = cfg
         self.repo = Path(repo_dir)
@@ -60,6 +61,8 @@ class Engine:
         # The repo's default branch: PRs are handled only into it or cfg.base_branches. None (a CI
         # driver that doesn't know it) skips the check.
         self.default_branch = default_branch
+        # Signs the plan/apply markers (the service's own key); None: markers are only anchored.
+        self.marker_key = marker_key
 
     # ---- helpers -------------------------------------------------------------------------------
 
@@ -144,9 +147,9 @@ class Engine:
         for note in self.vcs.list_notes(cr_id):
             if note.author != bot:
                 continue
-            for kind, data in render.parse_markers(note.body):
-                if kind == "plan" and data.get("inventory") == inventory:
-                    latest = data
+            found = render.trusted_marker(note.body, self.marker_key)
+            if found and found[0] == "plan" and found[1].get("inventory") == inventory:
+                latest = found[1]
         return latest
 
     # ---- commands ------------------------------------------------------------------------------
@@ -185,7 +188,7 @@ class Engine:
         if sc.empty:
             meta["clean"] = True
             body = render.plan_comment(inv.name, sha, sc, None, meta, self.red, self.cfg.max_comment_chars, self.job_url,
-                                       warnings=warnings, **self._apply_how())
+                                       warnings=warnings, marker_key=self.marker_key, **self._apply_how())
             self._post(cr_id, body)
             return Outcome(True, "plan", note_body=body, extra=meta)
         conflict = self._lock_conflict(inv.name, cr_id, sha, user)
@@ -195,7 +198,7 @@ class Engine:
         meta["clean"] = run.clean
         meta["counts"] = run.counts()
         body = render.plan_comment(inv.name, sha, sc, run, meta, self.red, self.cfg.max_comment_chars, self.job_url,
-                                   warnings=warnings, **self._apply_how())
+                                   warnings=warnings, marker_key=self.marker_key, **self._apply_how())
         self._post(cr_id, body)
         return Outcome(run.clean, "plan", run=run, note_body=body, extra=meta)
 
@@ -301,7 +304,8 @@ class Engine:
         run = self.runner.run(RunRequest(self.cfg.playbook, inv.path, plan.get("limit"), check=False, diff=True))
         meta = {"v": 1, "inventory": inv.name, "sha": sha, "limit": plan.get("limit"), "ok": run.clean,
                 "at": self.clock(), "user": user, "counts": run.counts()}
-        body = render.apply_comment(inv.name, sha, run, meta, self.red, self.cfg.max_comment_chars, self.job_url)
+        body = render.apply_comment(inv.name, sha, run, meta, self.red, self.cfg.max_comment_chars, self.job_url,
+                                    marker_key=self.marker_key)
         self._post(cr_id, body)
         return Outcome(run.clean, "apply", run=run, note_body=body, extra=meta)
 
