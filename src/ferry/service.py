@@ -207,6 +207,8 @@ class Settings:
     run_name_claim: str = "name"
     run_lease_seconds: float = 300.0
     run_cert_ttl: str = "15m"  # CLI certificates only; the role's max_ttl still caps it
+    run_ssh_role: str | None = None       # CLI certificates' signing role; None: the service's role
+    run_ssh_principal: str | None = None  # CLI certificates' principal; None: the service's
 
 
 @dataclass

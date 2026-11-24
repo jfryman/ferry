@@ -109,7 +109,7 @@ def test_operator_redacts_both_streams_and_preserves_exit(tmp_path, monkeypatch,
     assert requests[-1]['ok'] == (exit_code == 0)
 
 
-def run_operator(tmp_path, monkeypatch, body, **overrides):
+def run_operator(tmp_path, monkeypatch, body, extra_bin=None, opener=None, **overrides):
     """Run operator.run against a fake service and a fake ansible-playbook (a Python body)."""
     import json
     import time
@@ -125,6 +125,9 @@ def run_operator(tmp_path, monkeypatch, body, **overrides):
     executable = binary/'ansible-playbook'
     executable.write_text('#!/usr/bin/env python3\nimport os, sys\n' + body)
     executable.chmod(0o755)
+    for name, script in (extra_bin or {}).items():
+        (binary/name).write_text(script)
+        (binary/name).chmod(0o755)
     monkeypatch.setenv('PATH', str(binary)+':'+__import__('os').environ['PATH'])
     monkeypatch.setattr(operator, 'ferry_ansible_env', lambda *args: {})
     requests = []
@@ -138,7 +141,7 @@ def run_operator(tmp_path, monkeypatch, body, **overrides):
         def open(self, request, **kw):
             requests.append(json.loads(request.data))
             return Response()
-    monkeypatch.setattr(operator.urllib.request, 'build_opener', lambda *args: Opener())
+    monkeypatch.setattr(operator.urllib.request, 'build_opener', lambda *args: opener or Opener())
     args = dict(repo=repo, service='http://localhost:18080', insecure_http=False, no_host_key_checking=False,
                 playbook='site.yml', token_command='printf identity-test', inventory='demo', limit=None,
                 apply=False, reason=None)
@@ -160,3 +163,46 @@ def test_reason_is_sent_to_the_service(tmp_path, monkeypatch, capsys, reason):
     rc, requests = run_operator(tmp_path, monkeypatch, 'sys.exit(0)\n', reason=reason)
     assert rc == 0
     assert requests[0]['reason'] == reason
+
+
+def test_ssh_keygen_failure_is_a_clean_error(tmp_path, monkeypatch):
+    import ferry.operator as operator
+    keygen = '#!/bin/sh\necho "No user exists for uid 4242" >&2\nexit 255\n'
+    with pytest.raises(operator.OperatorError) as e:
+        run_operator(tmp_path, monkeypatch, 'sys.exit(0)\n', extra_bin={'ssh-keygen': keygen})
+    assert str(e.value) == "couldn't generate a key (ssh-keygen exit 255): No user exists for uid 4242"
+
+
+def http_error(code, ctype, body):
+    import io
+    import urllib.error
+    from email.message import Message
+    headers = Message()
+    if ctype:
+        headers['Content-Type'] = ctype
+    return urllib.error.HTTPError('https://ferry.example.com/api/runs', code, 'x', headers, io.BytesIO(body))
+
+
+@pytest.mark.parametrize('ctype,body,expected', [
+    ('application/json', b'{"error": "apply requires the main head (abc): merge and pull, then retry"}',
+     'apply requires the main head (abc): merge and pull, then retry'),
+    ('application/json', b'{"error": "inventory\\nlocked\\u001b[2J"}', 'inventory locked [2J'),
+    ('application/json', b'{"error": "' + b'x' * 1000 + b'"}', 'x' * 300),
+    ('text/html', b'<html>proxy error</html>', None),
+    ('application/json', b'not json', None),
+    ('application/json', b'{"error": 7}', None),
+    (None, b'{"error": "no content type"}', None),
+])
+def test_refusal_reason(ctype, body, expected):
+    from ferry.operator import refusal_reason
+    assert refusal_reason(http_error(409, ctype, body)) == expected
+
+
+def test_refusal_reason_reaches_the_operator(tmp_path, monkeypatch):
+    import ferry.operator as operator
+    class Refusing:
+        def open(self, request, **kw):
+            raise http_error(409, 'application/json', b'{"error": "inventory locked"}')
+    with pytest.raises(operator.OperatorError) as e:
+        run_operator(tmp_path, monkeypatch, 'sys.exit(0)\n', opener=Refusing())
+    assert str(e.value) == 'service refused request (HTTP 409): inventory locked'

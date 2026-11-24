@@ -95,13 +95,15 @@ class OpenBao:
         auth = self._call("POST", f"auth/{self.s.auth_mount}/login", data={"role": self.s.auth_role, "jwt": jwt})
         return auth["auth"]["client_token"]
 
-    def sign_ssh_key(self, token: str, public_key: str, ttl: str | None = None) -> str:
+    def sign_ssh_key(self, token: str, public_key: str, ttl: str | None = None, role: str | None = None,
+                     principal: str | None = None) -> str:
+        """Sign with the service's role, or (CLI runs) another role and principal on the same mount."""
         req = {"public_key": public_key, "cert_type": "user"}
         if ttl or self.s.ssh_ttl:
             req["ttl"] = ttl or self.s.ssh_ttl
-        if self.s.ssh_principal:
-            req["valid_principals"] = self.s.ssh_principal
-        data = self._call("POST", f"{self.s.ssh_mount}/sign/{self.s.ssh_role}", token, req)
+        if principal or self.s.ssh_principal:
+            req["valid_principals"] = principal or self.s.ssh_principal
+        data = self._call("POST", f"{self.s.ssh_mount}/sign/{role or self.s.ssh_role}", token, req)
         return data["data"]["signed_key"]
 
     def read_field(self, token: str, path: str, field: str) -> str:
