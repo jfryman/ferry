@@ -45,6 +45,7 @@ import queue
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,8 @@ from .engine import Engine
 from .locks import LockStore
 from .runner import AnsibleRunner
 from .sanitize import Redactor
+from . import __version__
+from .metrics import Metrics, reject_reason
 from .state import MemoryState
 from .vcs.github import GitHubBackend
 from .webhook import COMMAND_RE
@@ -96,6 +99,21 @@ def parse_time(value) -> float | None:
 def delivery_keys(delivery: str, body: bytes) -> list[str]:
     """What makes a delivery a duplicate: its id, or the exact signed body under any id."""
     return ([f"id:{delivery}"] if delivery else []) + ["body:" + hashlib.sha256(body).hexdigest()]
+
+
+def job_result(result: dict) -> str:
+    """One of metrics.RESULTS: ok; skipped (the PR moved on); refused (a gate said no, nothing ran);
+    failed (ansible ran and wasn't clean); error (ferry couldn't finish)."""
+    if result.get("skipped") is True:
+        return "skipped"
+    if result.get("error"):
+        return "error"
+    if result.get("ok"):
+        return "ok"
+    outcomes = list((result.get("inventories") or {}).values())
+    if outcomes and all(o["ok"] or o.get("reasons") for o in outcomes):
+        return "refused"
+    return "failed"
 
 
 class _NoRunner:
@@ -152,6 +170,7 @@ class Service:
     secret: bytes
     bao: OpenBao | None = None
     state: MemoryState = field(default_factory=MemoryState)  # seen deliveries; SQLiteState in serve
+    metrics: Metrics = field(default_factory=Metrics)
     runner_factory: Callable[[Path, str, dict], object] = field(
         default=lambda repo, marker, env: AnsibleRunner(repo, marker, env=env))
     clock: Callable[[], float] = time.time
@@ -162,8 +181,26 @@ class Service:
 
     # ---- webhook (fast path: decide and enqueue) ------------------------------------------------
 
+    def receive(self, headers, body: bytes) -> tuple[int, str]:
+        """The HTTP entry point: handle the delivery, and count it if it was refused."""
+        status, text = self.handle_request(headers, body)
+        self.count_reject(status, text)
+        return status, text
+
+    def count_reject(self, status: int, text: str) -> None:
+        reason = reject_reason(status, text)
+        if reason:
+            self.metrics.inc("ferry_webhook_rejected_total", reason=reason)
+
+    def render_metrics(self) -> str:
+        count = getattr(self.locks, "count", None)
+        live = {"ferry_queue_depth": self.jobs.qsize}
+        if count is not None:
+            live["ferry_locks_held"] = count
+        return self.metrics.render(live, version=__version__)
+
     def handle_request(self, headers, body: bytes) -> tuple[int, str]:
-        """The HTTP entry point: pick the code host's headers, then handle()."""
+        """Pick the code host's headers, then handle()."""
         return self.handle(headers.get("X-GitHub-Event", ""), headers.get("X-GitHub-Delivery", ""),
                            headers.get("X-Hub-Signature-256"), body)
 
@@ -296,6 +333,7 @@ class Service:
         except queue.Full:
             log.warning("queue full (%s jobs): dropped %s for #%s", self.jobs.maxsize, job.action, job.pr)
             return 503, "queue full, try again later"
+        self.metrics.inc("ferry_jobs_queued_total", action=job.action)
         return 202, f"{job.action} queued"
 
     def _say_waiting(self, number: int, sha: str, author: str, who: str = "authors") -> None:
@@ -320,21 +358,30 @@ class Service:
             else:
                 result.update(self._plan_or_apply(job))
         except CheckoutError as e:
-            result["error"] = str(e)
+            result.update(error=str(e), skipped=True)
             log.warning("job %s for #%s skipped: %s", job.action, job.pr, e)
             if job.pinned:  # someone asked for this commit: tell them it didn't run
                 self._report_moved(job, str(e))
         except HeadMoved as e:
-            result["error"] = str(e)
+            result.update(error=str(e), skipped=True)
             self._report_moved(job, str(e))
         except Exception as e:  # report on the PR, keep the service up
             result["error"] = f"{type(e).__name__}: {e}"
             log.exception("job %s for #%s failed", job.action, job.pr)
             if job.pr and job.action in ("plan", "apply"):
                 self._report_error(job, result["error"])
-        result["seconds"] = round(self.clock() - started, 1)
+        finished = self.clock()
+        result["seconds"] = round(finished - started, 1)
+        result["result"] = job_result(result)
         self.last_job = result
         log.info("job done: %s", result)
+        try:
+            self.metrics.job_done(job.action, result["result"], finished - started, finished)
+            self.state.record_job({"action": job.action, "pr": job.pr or None, "sha": job.sha[:12] or None,
+                                   "user": job.user or None, "inventory": job.inventory,
+                                   "result": result["result"], "started": started, "seconds": result["seconds"]})
+        except Exception:  # bookkeeping never fails a job
+            log.exception("couldn't record job %s for #%s", job.action, job.pr)
         return result
 
     def _unlock(self, job: Job) -> dict:
@@ -459,38 +506,55 @@ def make_handler(service: Service, max_body: int | None = None):
         # Socket timeout for every read and write: a client that stalls (slowloris) is dropped.
         timeout = service.settings.request_timeout_seconds
 
-        def _send(self, status: int, text: str) -> None:
+        def _send(self, status: int, text: str, ctype: str = "text/plain") -> None:
             data = (text + "\n").encode()
             self.send_response(status)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
-            if self.path == "/healthz":
+            url = urllib.parse.urlsplit(self.path)
+            path, query = url.path, urllib.parse.parse_qs(url.query)
+            if path == "/healthz":
                 # No error text here: it can name internal hosts and paths, and /healthz is unauthenticated.
                 last = {k: service.last_job[k] for k in ("job", "pr", "ok", "seconds") if k in service.last_job}
                 self._send(200, json.dumps({"ok": True, "queued": service.jobs.qsize(), "last_job": last}))
+            elif path == "/metrics":
+                self._send(200, service.render_metrics().rstrip("\n"), "text/plain; version=0.0.4; charset=utf-8")
+            elif path == "/jobs":
+                # Read-only job history: action, PR, short SHA, user, inventory, result, timing. No
+                # error text or reasons (unauthenticated, like /healthz).
+                try:
+                    limit = min(max(int((query.get("limit") or ["50"])[0]), 1), 200)
+                except ValueError:
+                    return self._send(400, "bad limit")
+                self._send(200, json.dumps({"jobs": service.state.jobs(limit)}), "application/json")
             else:
                 self._send(404, "not found")
+
+        def _refuse(self, status: int, text: str) -> None:
+            service.count_reject(status, text)
+            self._send(status, text)
 
         def do_POST(self):
             if self.path != "/webhook":
                 return self._send(404, "not found")
             if self.headers.get("Transfer-Encoding"):
-                return self._send(411, "Content-Length required")
+                self.close_connection = True
+                return self._refuse(411, "Content-Length required")
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = -1
             if length <= 0 or length > max_body:
                 self.close_connection = True  # don't read (or wait for) a body we refuse
-                return self._send(413 if length > max_body else 400, "bad length")
+                return self._refuse(413 if length > max_body else 400, "bad length")
             body = self.rfile.read(length)
             if len(body) != length:
                 return  # the client went away mid-body
-            status, text = service.handle_request(self.headers, body)
+            status, text = service.receive(self.headers, body)
             self._send(status, text)
 
         def log_message(self, fmt, *args):

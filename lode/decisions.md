@@ -212,3 +212,12 @@ ferry.yaml kept its lock forever. `LockStore.release_all(holder)` deletes by PR 
 memory and tag locks). The job first asks the API whether the PR is open again (a quick reopen
 keeps its locks); if the API can't answer, the fresh, verified close event is trusted. Losing the
 state file frees every lock, documented in the README.
+
+## Metrics and job history without dependencies (#16)
+`ferry.metrics` writes the Prometheus text format itself (counters, gauges, one histogram). It's
+small, and the image stays `PyYAML` + `cryptography`. Label values come only from fixed sets
+(`ACTIONS`, `RESULTS`, `REJECT_REASONS`), and the fixed series are emitted at zero, so a webhook can
+neither add series nor smuggle text into `/metrics`. Rejects are classified from the intake's answer
+(`reject_reason`) in `Service.receive` and the HTTP handler, the same for both backends. Job history
+is a bounded `jobs` table in the state file (`FERRY_JOB_HISTORY`, default 200), served read-only at
+`/jobs` without error text or reasons, for the same reason `/healthz` has none.

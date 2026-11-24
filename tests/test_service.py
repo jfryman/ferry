@@ -533,3 +533,79 @@ def test_a_reopened_pr_keeps_its_locks(world):
     [unlock] = world.drain()
     assert unlock["released"] == [] and "open again" in unlock["skipped"]
     assert world.locks.get("homelab").holder == 1
+
+
+# ---- metrics and job history (#16) ---------------------------------------------------------------
+
+
+def get(addr, path):
+    with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}{path}") as resp:
+        return resp.status, resp.headers.get("Content-Type"), resp.read().decode()
+
+
+def test_metrics_and_job_history(world, http):
+    world.svc.state = __import__("ferry.state", fromlist=["x"]).SQLiteState(world.tmp / "state.db", job_history=2)
+    world.svc.state.saw_head(1, world.sha, NOW - 120)
+    world.svc.bao = None
+    body = json.dumps(world.comment_event("/ferry plan")).encode()
+    hdr = b"POST /webhook HTTP/1.1\r\nHost: x\r\nX-GitHub-Event: issue_comment\r\nConnection: close\r\n"
+    assert b" 401 " in raw(http, hdr + b"X-Hub-Signature-256: sha256=00\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+    assert b" 413 " in raw(http, hdr + b"Content-Length: 99999\r\n\r\n")
+    world.deliver("issue_comment", world.comment_event("/ferry plan", at="2027-01-15T07:00:00Z"))  # stale
+    world.svc.count_reject(202, "stale event (older than 10 minutes)")  # deliver() bypasses HTTP: count it
+    world.deliver("pull_request", world.pr_event())
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [plan, apply] = world.drain()
+    assert (plan["result"], apply["result"]) == ("ok", "refused")
+
+    status, ctype, text = get(http, "/metrics")
+    assert status == 200 and ctype.startswith("text/plain; version=0.0.4")
+    for line in ('ferry_jobs_total{action="plan",result="ok"} 1',
+                 'ferry_jobs_total{action="apply",result="refused"} 1',
+                 'ferry_jobs_total{action="drift",result="error"} 0',
+                 'ferry_jobs_queued_total{action="plan"} 1',
+                 'ferry_job_duration_seconds_count{action="plan"} 1',
+                 'ferry_job_duration_seconds_bucket{action="plan",le="+Inf"} 1',
+                 'ferry_webhook_rejected_total{reason="bad_auth"} 1',
+                 'ferry_webhook_rejected_total{reason="too_large"} 1',
+                 'ferry_webhook_rejected_total{reason="stale"} 1',
+                 'ferry_last_job_timestamp_seconds{action="apply"} 1800000000',
+                 "ferry_queue_depth 0", "ferry_locks_held 1", "# TYPE ferry_job_duration_seconds histogram"):
+        assert line in text.splitlines(), line
+    assert 'ferry_build_info{version="' in text
+    # Nothing request-derived or secret: no users, commits, repo, secret or token.
+    for leak in ("james", "pip", world.sha[:7], "acme", SECRET.decode(), "tok"):
+        assert leak not in text, leak
+
+    status, ctype, text = get(http, "/jobs?limit=5")
+    jobs = json.loads(text)["jobs"]
+    assert ctype == "application/json" and [j["action"] for j in jobs] == ["apply", "plan"]
+    assert jobs[0] == {"id": 2, "action": "apply", "pr": 1, "sha": world.sha[:12], "user": "james",
+                       "inventory": None, "result": "refused", "started": NOW, "seconds": 0.0}
+    world.svc.jobs.put(Job("unlock", 1, world.sha, "pip"))
+    world.closed = True
+    world.drain()
+    jobs = json.loads(get(http, "/jobs")[2])["jobs"]
+    assert [j["action"] for j in jobs] == ["unlock", "apply"]  # bounded: the newest 2
+    with pytest.raises(urllib.error.HTTPError):
+        get(http, "/jobs?limit=x")
+
+
+def test_job_results():
+    from ferry.service import job_result
+    assert job_result({"ok": True}) == "ok"
+    assert job_result({"ok": False, "error": "x", "skipped": True}) == "skipped"
+    assert job_result({"ok": False, "error": "RuntimeError: x"}) == "error"
+    assert job_result({"ok": False, "inventories": {"a": {"ok": False, "reasons": ["no approval"]}}}) == "refused"
+    assert job_result({"ok": False, "inventories": {"a": {"ok": False, "reasons": []}}}) == "failed"
+
+
+def test_metric_labels_are_escaped_and_bounded():
+    from ferry.metrics import Metrics, reject_reason
+    m = Metrics()
+    m.inc("ferry_jobs_total", action='pl"an\n', result="ok")
+    assert 'action="pl\\"an\\n"' in m.render()
+    assert reject_reason(202, "plan queued") is None and reject_reason(202, "waiting for /ferry plan") is None
+    assert reject_reason(202, "apply refused: no Developer access") == "no_access"
+    assert reject_reason(202, "plan refused: the head isn't the one commented on") == "head_moved"
+    assert reject_reason(503, "queue full, try again later") == "queue_full"

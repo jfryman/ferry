@@ -1,5 +1,5 @@
-"""The service's own state, next to its locks: the webhook deliveries it has already seen, and when
-each PR head arrived (from the code host's signed pull_request events).
+"""The service's own state, next to its locks: the webhook deliveries it has already seen, when
+each PR head arrived (from the code host's signed pull_request events), and the last N jobs.
 
 It lives in the SQLite file the service already owns (FERRY_LOCK_DB), so it survives a restart and
 needs no extra volume. Every table is bounded: rows expire after a TTL and are capped in count.
@@ -20,10 +20,17 @@ DELIVERY_TTL = 7 * 24 * 3600  # GitHub and GitLab let a person redeliver for day
 DELIVERY_MAX_ROWS = 20_000
 HEAD_TTL = 30 * 24 * 3600
 HEAD_MAX_ROWS = 20_000
+JOB_HISTORY = 200
+# What the job history keeps: no error text or refusal reasons (they can name internal hosts and
+# paths, and the history is served unauthenticated); those are on the PR and in the service log.
+JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds")
 
 
 class MemoryState:
-    def __init__(self):
+    def __init__(self, job_history: int = JOB_HISTORY):
+        self.job_history = max(1, job_history)
+        self._jobs: list[dict] = []
+        self._next_job = 1
         self._lock = threading.Lock()
         self._seen: OrderedDict[str, float] = OrderedDict()
         self._heads: dict[int, tuple[str, float]] = {}  # pr -> (head, when it became the head)
@@ -67,13 +74,32 @@ class MemoryState:
             return cur[1] if cur and cur[0] == sha else None
 
 
+    def record_job(self, job: dict) -> int:
+        """Append a finished job (JOB_FIELDS only), keeping the newest job_history."""
+        with self._lock:
+            row = {f: job.get(f) for f in JOB_FIELDS}
+            row["id"] = self._next_job
+            self._next_job += 1
+            self._jobs.append(row)
+            del self._jobs[:-self.job_history]
+            return row["id"]
+
+    def jobs(self, limit: int = 50) -> list[dict]:
+        """The newest jobs first."""
+        with self._lock:
+            return [dict(j) for j in reversed(self._jobs[-max(0, limit):])] if limit > 0 else []
+
+
 class SQLiteState(MemoryState):
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, job_history: int = JOB_HISTORY):
+        self.job_history = max(1, job_history)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db:
             db.execute("CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, seen REAL NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS deliveries_seen ON deliveries (seen)")
+            db.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT,"
+                       " pr INTEGER, sha TEXT, user TEXT, inventory TEXT, result TEXT, started REAL, seconds REAL)")
             db.execute("CREATE TABLE IF NOT EXISTS heads (pr INTEGER PRIMARY KEY, sha TEXT NOT NULL, at REAL NOT NULL)")
 
     def _connect(self) -> sqlite3.Connection:
@@ -124,3 +150,18 @@ class SQLiteState(MemoryState):
         with closing(self._connect()) as db:
             row = db.execute("SELECT at FROM heads WHERE pr = ? AND sha = ?", (pr, sha)).fetchone()
         return row[0] if row else None
+
+    def record_job(self, job):
+        cols = JOB_FIELDS[1:]
+        with closing(self._connect()) as db:
+            cur = db.execute(f"INSERT INTO jobs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                             [job.get(c) for c in cols])
+            db.execute("DELETE FROM jobs WHERE id <= ?", (cur.lastrowid - self.job_history,))
+            return cur.lastrowid
+
+    def jobs(self, limit=50):
+        if limit <= 0:
+            return []
+        with closing(self._connect()) as db:
+            rows = db.execute(f"SELECT {', '.join(JOB_FIELDS)} FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(zip(JOB_FIELDS, r)) for r in rows]

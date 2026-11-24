@@ -111,10 +111,13 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
 
   FERRY_VCS                      github or gitlab (or --vcs); unset: gitlab if FERRY_GITLAB_URL is set
   FERRY_WEBHOOK_SECRET_FILE      file holding the webhook secret (or FERRY_WEBHOOK_SECRET)
-  FERRY_LOCK_DB                  state file on persistent storage (required): locks, seen deliveries
+  FERRY_LOCK_DB                  state file on persistent storage (required): locks, seen deliveries,
+                                 PR head arrival times, job history
+  FERRY_JOB_HISTORY              200 (default): finished jobs kept for GET /jobs
   FERRY_WORKDIR                  checkouts and caches (default /var/lib/ferry/work)
   FERRY_DEFAULT_BRANCH           GitHub: default main; GitLab: default the project's default branch
-  FERRY_LISTEN                   host:port, default 0.0.0.0:8080 (POST /webhook, GET /healthz)
+  FERRY_LISTEN                   host:port, default 0.0.0.0:8080 (POST /webhook; GET /healthz, /metrics,
+                                 /jobs: unauthenticated, no secrets; keep them inside the cluster)
   FERRY_SSH_USER                 remote user for ansible (e.g. root)
   FERRY_DRIFT_INTERVAL_HOURS     0 (default) disables scheduled drift runs
   FERRY_STARTUP_ATTEMPTS         8 (default): tries to reach the code host at start, with backoff
@@ -264,7 +267,7 @@ def build_service(vcs: str | None = None):
         settings=settings,
         vcs=vcs,
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
-        state=SQLiteState(required["FERRY_LOCK_DB"]),
+        state=SQLiteState(required["FERRY_LOCK_DB"], job_history=int(_env("FERRY_JOB_HISTORY", "200"))),
         workspace=Workspace(workdir, f"{git_url}/{repo}.git", tokens),
         secret=secret().encode(),
         bao=_openbao(),
@@ -290,7 +293,7 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
         settings=settings,
         vcs=vcs,
         locks=SQLiteLocks(required["FERRY_LOCK_DB"]),
-        state=SQLiteState(required["FERRY_LOCK_DB"]),
+        state=SQLiteState(required["FERRY_LOCK_DB"], job_history=int(_env("FERRY_JOB_HISTORY", "200"))),
         workspace=Workspace(workdir, remote, token, change_ref="refs/merge-requests/{number}/head",
                             git_user="oauth2"),
         secret=secret.encode(),
