@@ -13,7 +13,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 from .base import ChangeRequest, Note
@@ -148,6 +148,24 @@ class GitLabBackend:
         if mr.get("sha") != cr.head_sha:
             raise ValueError("the MR head moved while ferry was checking")
         return n
+
+    def contributors(self, cr: ChangeRequest) -> set[str]:
+        """Who pushed to the MR's source branch: GitLab's project push events, which GitLab records
+        itself (commit author fields are whatever the committer typed). From a week before the MR
+        was opened, so pushes that made the branch count too. The MR author is always included."""
+        mr = self.client.request("GET", f"{self._p}/merge_requests/{cr.id}") or {}
+        created = mr.get("created_at")
+        params = {"action": "pushed"}
+        if created:
+            params["after"] = (_ts(created) - timedelta(days=8)).date().isoformat()
+        out = {cr.author}
+        for ev in self.client.paged(f"{self._p}/events", params):
+            push = ev.get("push_data") or {}
+            if push.get("ref_type") == "branch" and push.get("ref") == cr.source_branch:
+                user = (ev.get("author") or {}).get("username") or ev.get("author_username")
+                if user:
+                    out.add(user)
+        return out
 
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()

@@ -254,6 +254,20 @@ class GitHubBackend:
             raise ValueError("GitHub's compare API didn't say how far behind the PR is")
         return behind
 
+    def contributors(self, cr: ChangeRequest) -> set[str]:
+        """Logins GitHub links to the PR's commits as author or committer (web-flow is GitHub's own
+        committer for web edits). GitHub lists at most 250 commits; past that, ferry can't tell."""
+        commits = self.client.paged(f"{self._r}/pulls/{cr.id}/commits", max_pages=3)
+        if len(commits) >= 250:
+            raise ValueError("the PR has 250+ commits; GitHub doesn't list them all")
+        out = set()
+        for c in commits:
+            for role in ("author", "committer"):
+                login = (c.get(role) or {}).get("login")
+                if login and login != "web-flow":
+                    out.add(login)
+        return out
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for f in self.client.paged(f"{self._r}/pulls/{cr_id}/files"):

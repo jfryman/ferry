@@ -26,6 +26,8 @@ class FakeGitLab:
         if "/repository/tags" in path:
             return self._tags(method, path, data)
         handler = self.routes.get((method, path))
+        if handler is None and method == "GET" and path.endswith("/events"):
+            handler = []  # #25: no push events listed means only the MR author pushed
         if handler is None:
             return 404, b'{"message":"404 Not Found"}'
         status, obj = handler(url, data) if callable(handler) else (200, handler)
@@ -279,3 +281,30 @@ def test_behind_by_uses_diverged_commits_count(gl):
     fake.routes[("GET", "/projects/infra%2Fansible/merge_requests/7")] = lambda u, d: (502, {})
     with pytest.raises(GitLabError):
         be.behind_by(cr)
+
+
+def test_contributors_are_pushers_to_the_source_branch(gl):
+    from ferry.vcs.base import ChangeRequest
+    from ferry.vcs.gitlab import GitLabError
+    fake, client, be = gl
+    p = "/projects/infra%2Fansible"
+    fake.routes[("GET", f"{p}/merge_requests/7")] = {"iid": 7, "sha": "a" * 40, "source_branch": "feat",
+                                                     "target_branch": "main", "author": {"username": "alice"},
+                                                     "state": "opened", "created_at": "2026-11-20T10:00:00Z"}
+    seen = []
+
+    def events(url, d):
+        seen.append(url)
+        return 200, [
+            {"action_name": "pushed to", "author": {"username": "bob"}, "push_data": {"ref": "feat", "ref_type": "branch"}},
+            {"action_name": "pushed new", "author": {"username": "alice"}, "push_data": {"ref": "feat", "ref_type": "branch"}},
+            {"action_name": "pushed to", "author": {"username": "carol"}, "push_data": {"ref": "main", "ref_type": "branch"}},
+            {"action_name": "pushed to", "author": {"username": "dave"}, "push_data": {"ref": "feat", "ref_type": "tag"}},
+        ]
+    fake.routes[("GET", f"{p}/events")] = events
+    cr = ChangeRequest(7, "a" * 40, "feat", "main", "alice", "opened")
+    assert be.contributors(cr) == {"alice", "bob"}
+    assert "action=pushed" in seen[-1] and "after=2026-11-12" in seen[-1]
+    fake.routes[("GET", f"{p}/events")] = lambda u, d: (403, {"message": "403 Forbidden"})
+    with pytest.raises(GitLabError):
+        be.contributors(cr)

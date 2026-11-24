@@ -29,6 +29,8 @@ class FakeGitHub:
         data = json.loads(body) if body else None
         self.calls.append((method, path, parse_qs(parsed.query), data))
         handler = self.routes.get((method, path))
+        if handler is None and method == "GET" and path.endswith("/commits") and "/pulls/" in path:
+            handler = []  # #25: no commits listed means nobody but the author contributed
         if handler is None and method == "GET" and "/compare/" in path:
             handler = {"status": "behind" if self.behind_by else "ahead", "behind_by": self.behind_by, "ahead_by": 1}
         if handler is None:
@@ -374,3 +376,31 @@ def test_behind_by_uses_the_compare_api(gh_backend=None):
     fake.routes[("GET", f"{R}/compare/main...{'a' * 40}")] = {"status": "ahead"}  # no behind_by: unknown
     with pytest.raises(ValueError):
         be.behind_by(cr)
+
+
+def test_contributors_are_commit_authors_and_committers():
+    from ferry.vcs.base import ChangeRequest
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="b[bot]")
+    fake.routes[("GET", f"{R}/pulls/1/commits")] = [
+        {"sha": "1", "author": {"login": "alice"}, "committer": {"login": "web-flow"}},
+        {"sha": "2", "author": {"login": "alice"}, "committer": {"login": "bob"}},  # bob rebased/amended
+        {"sha": "3", "author": None, "committer": None,  # emails not linked to an account
+         "commit": {"author": {"email": "x@y"}, "committer": {"email": "x@y"}}},
+        {"sha": "4", "author": {"login": "Carol"}, "committer": {"login": "carol"}},
+    ]
+    cr = ChangeRequest(1, "a" * 40, "f", "main", "alice", "opened")
+    assert be.contributors(cr) == {"alice", "bob", "Carol", "carol"}
+    fake.routes[("GET", f"{R}/pulls/1/commits")] = lambda q, d: (500, {"message": "x"})
+    with pytest.raises(GitHubError):
+        be.contributors(cr)
+
+
+def test_contributors_refuse_a_pr_with_more_commits_than_github_lists():
+    from ferry.vcs.base import ChangeRequest
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="b[bot]")
+    page = [{"sha": str(i), "author": {"login": "alice"}, "committer": {"login": "alice"}} for i in range(100)]
+    fake.routes[("GET", f"{R}/pulls/1/commits")] = lambda q, d: (200, page if int(q["page"][0]) <= 3 else [])
+    with pytest.raises(ValueError, match="250"):
+        be.contributors(ChangeRequest(1, "a" * 40, "f", "main", "alice", "opened"))

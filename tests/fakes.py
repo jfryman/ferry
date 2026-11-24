@@ -21,6 +21,7 @@ class FakeVCS:
         self.rule_blockers: dict[int, list[str]] = {}
         self.lookup_errors: dict[int, Exception] = {}  # get_change_request(id) raises this
         self.behind: dict[int, int | Exception] = {}  # commits the base has that the PR doesn't
+        self.contributors_of: dict[int, set | Exception] = {}  # who authored/committed/pushed
         self._next = 1
 
     def add_cr(self, cr_id, sha="a" * 40, author="pip", files=None, **kw):
@@ -46,6 +47,12 @@ class FakeVCS:
         if isinstance(v, Exception):
             raise v
         return v
+
+    def contributors(self, cr):
+        v = self.contributors_of.get(cr.id, {cr.author})
+        if isinstance(v, Exception):
+            raise v
+        return set(v)
 
     def changed_files(self, cr_id):
         return list(self.files[cr_id])

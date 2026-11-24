@@ -45,6 +45,7 @@ class Engine:
         apply_how: str | None = None,
         default_branch: str | None = None,
         marker_key: bytes | None = None,
+        pushers=None,
     ):
         self.cfg = cfg
         self.repo = Path(repo_dir)
@@ -63,6 +64,8 @@ class Engine:
         self.default_branch = default_branch
         # Signs the plan/apply markers (the service's own key); None: markers are only anchored.
         self.marker_key = marker_key
+        # Users the driver saw push to a PR (webhook senders), on top of what the code host lists.
+        self.pushers = pushers or (lambda cr_id: set())
 
     # ---- helpers -------------------------------------------------------------------------------
 
@@ -232,18 +235,37 @@ class Engine:
         # An approval counts only from someone who could apply it themselves: on a public GitHub repo
         # anyone can leave an approving review, and the code host's own rules may not require more.
         # ferry's own account never counts (a job that got hold of its credentials could approve).
+        # Nor does one from someone who wrote part of the change (#25): authored, committed or pushed
+        # commits in it. allow_author_approval is the one opt-out, for solo repos.
         bot = self.vcs.bot_username()
-        approvers = [a for a in self.vcs.approvers(cr_id)
-                     if a != bot
-                     and (self.cfg.apply.allow_author_approval or a != cr.author)
-                     and self.vcs.can_apply(a)]
+        solo = self.cfg.apply.allow_author_approval
+        contributors: set[str] = set()
+        if not solo:
+            try:
+                contributors = {c.lower() for c in self.vcs.contributors(cr) | set(self.pushers(cr_id))}
+            except Exception as e:
+                status = getattr(e, "status", None)
+                reasons.append(f"ferry couldn't tell who pushed to this MR ({type(e).__name__}"
+                               + (f", HTTP {status}" if status else "") + "), so no approval counts; try again")
+                contributors = None
+        approvers, excluded = [], []
+        for a in self.vcs.approvers(cr_id):
+            if a == bot or not self.vcs.can_apply(a):
+                continue
+            if not solo and (a == cr.author or contributors is None or a.lower() in contributors):
+                if a != cr.author and contributors is not None:
+                    excluded.append(a)
+                continue
+            approvers.append(a)
         if len(approvers) < self.cfg.apply.min_approvals:
             reasons.append(
                 f"needs {self.cfg.apply.min_approvals} approval(s)"
-                + ("" if self.cfg.apply.allow_author_approval else " from someone other than the author")
+                + ("" if solo else " from someone other than the author and anyone who pushed to it")
                 + " with write access (Developer+ on GitLab)"
                 + f", has {len(approvers)}"
             )
+            for a in excluded:
+                reasons.append(f"the approval from `{a}` doesn't count: `{a}` pushed or authored commits in this MR")
         allowed = self.cfg.apply.allowed_users
         if allowed and user not in allowed:
             reasons.append(f"`{user}` is not in apply.allowed_users")

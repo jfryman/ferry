@@ -898,3 +898,71 @@ def test_the_error_path_applies_ferry_yaml_patterns(repo, tmp_path, monkeypatch)
     w.deliver("pull_request", w.pr_event())
     w.drain()
     assert "corp-123456" not in w.comments[-1]["body"]
+
+
+# ---- #25: approvals from people who pushed to the PR ------------------------------------------------
+
+def add_writer(world, user):
+    world.writers.add(user)
+    world.gh.routes[("GET", f"{R}/collaborators/{user}/permission")] = lambda q, d: (200, {"role_name": "write"})
+
+
+def approve(world, user):
+    world.reviews.append({"user": {"login": user}, "state": "APPROVED", "commit_id": world.sha})
+
+
+def test_a_writer_who_pushed_then_approved_does_not_count(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())  # pip's PR
+    world.drain()
+    world.deliver("pull_request", world.pr_event("synchronize", sender="james"))  # james pushes to it
+    world.drain()
+    approve(world, "james")
+    minted = count_credentials(monkeypatch)
+    world.deliver("issue_comment", world.comment_event("/ferry apply", user="james"))
+    [refused] = world.drain()
+    reasons = refused["inventories"]["homelab"]["reasons"]
+    assert not refused["ok"] and not minted
+    assert any("`james` pushed or authored" in r for r in reasons), reasons
+
+
+def test_a_commit_author_from_the_api_does_not_count_either(world, monkeypatch):
+    world.gh.routes[("GET", f"{R}/pulls/1/commits")] = [
+        {"sha": world.sha, "author": {"login": "pip"}, "committer": {"login": "james"}}]
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    approve(world, "james")
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"]
+    assert any("`james`" in r for r in refused["inventories"]["homelab"]["reasons"])
+
+
+def test_a_third_writer_approving_applies(world):
+    add_writer(world, "carol")
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.deliver("pull_request", world.pr_event("synchronize", sender="james"))
+    world.drain()
+    approve(world, "carol")
+    world.deliver("issue_comment", world.comment_event("/ferry apply", user="james"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+
+
+def test_pushers_survive_a_restart(tmp_path):
+    from ferry.state import SQLiteState
+    a = SQLiteState(tmp_path / "s.db")
+    a.saw_pusher(1, "james", NOW)
+    a.saw_pusher(1, "", NOW)
+    assert SQLiteState(tmp_path / "s.db").pushers(1) == {"james"}
+    assert SQLiteState(tmp_path / "s.db").pushers(2) == set()
+
+
+def test_unreadable_commits_refuse(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    approve(world, "james")
+    world.gh.routes[("GET", f"{R}/pulls/1/commits")] = lambda q, d: (502, {"message": "x"})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and any("couldn't tell who pushed" in r for r in refused["inventories"]["homelab"]["reasons"])
