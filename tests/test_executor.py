@@ -67,7 +67,10 @@ def executor(tmp_path):
     pb = fake_playbook(tmp_path / "ansible-playbook", EVIL)
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": SRC, "HOME": str(tmp_path), "FERRY_EXECUTOR_SOCKET": sock,
            "FERRY_WORKDIR": str(work), "FERRY_EXECUTOR_ANSIBLE_PLAYBOOK": pb, "SOCK": sock}
-    proc = subprocess.Popen([sys.executable, "-m", "ferry.cli", "executor"], env=env,
+    # Executor() directly rather than `ferry executor`, whose startup check refuses root (CI is root).
+    code = "import os; from ferry.executor import Executor; " \
+           "Executor(os.environ['SOCK'], [os.environ['FERRY_WORKDIR']], os.environ['FERRY_EXECUTOR_ANSIBLE_PLAYBOOK']).serve_forever()"
+    proc = subprocess.Popen([sys.executable, "-c", code], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for _ in range(100):
         if os.path.exists(sock):
