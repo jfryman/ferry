@@ -9,6 +9,8 @@ his day job, so the engine is kept independent of GitLab CI.
 - v0.1.1 (0.1.0 + diff header fix): engine, GitLab backend, tag locks, CLI, webhook core (parse + trigger), drift metrics.
 - Driver in use: GitLab CI in infra/ansible (`ferry plan` on MR, manual `ferry:apply`,
   scheduled `ferry drift`, `ferry unlock` on main).
+- `ferry serve` (service.py) runs with a GitHub App or, via gitlab_service.GitLabService, against
+  GitLab (project access token, MR + comment webhooks); see decisions.md.
 - Not deployed: the webhook service (comment-triggered `/ferry apply`). Code + tests exist.
 - No real hosts yet: the Pi inventory is pending (SSH bootstrap with James).
 

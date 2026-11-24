@@ -2,6 +2,8 @@
 
 - Every engine behavior change gets a test in `tests/test_engine.py` with `FakeVCS`/`FakeRunner`.
   GitLab API shape changes get one in `tests/test_gitlab.py` (`FakeGitLab` transport).
+- Service intake changes get a test per backend: `tests/test_service.py` (GitHub) and
+  `tests/test_gitlab_service.py` (GitLab, same shape: real git remote, fake API).
 - The callback plugin is covered by a real `ansible-playbook` run (local connection); keep it.
 - Never add a gate to apply without a matching refusal test (`test_apply_refusals`).
 - Keep `VCSBackend` small; anything backend-specific is computed inside the backend

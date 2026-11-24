@@ -133,3 +133,18 @@ FERRY_OPENBAO_PLAYBOOK_TOKEN). As PID 1 the executor runs kill(-1) after each jo
 replaced socket, so leftovers can't catch the next job. The playbook still reads the job's cert and
 vault password: inherent. The static policy is a lint, not a boundary: a lookup plugin in the repo
 runs on the controller during a plan (the lab's `evil` uses one).
+
+## ferry serve for GitLab
+Same service, a different intake (2026-11-23): `GitLabService` subclasses `Service` and overrides only
+the webhook fast path (X-Gitlab-Token compared in constant time, since GitLab doesn't sign bodies;
+dedupe on Idempotency-Key, else X-Gitlab-Event-UUID; Merge Request / Note hooks to the same Jobs).
+The HTTP handler calls `service.handle_request(headers, body)` so each backend reads its own
+headers. Workspace takes the change ref template and git user (refs/merge-requests/<n>/head,
+oauth2). Approvals of the current head only: GitLab has no commit on an approval, so
+`GitLabBackend.approvers` compares `approved_at` with the created_at of the newest MR diff version
+whose head is the MR SHA; without `approved_at` it trusts approvals only when the project resets
+them on push, else counts none (benefits the CI driver too). `unchecked`/`checking`/`preparing`
+refuse (GitHub's `unknown`). `ci_must_pass`/`ci_still_running` block in the service
+(`pipeline_blocks=True`, like GitHub required checks) but not in the CI driver, whose apply job runs
+inside that pipeline. Token: project access token, Developer, api + read_repository.
+

@@ -158,7 +158,45 @@ pull_request and issue_comment, delivered to `POST /webhook` with a secret.
 Don't give the App a bypass on the branch's rulesets: it doesn't need one, and GitHub computes the
 merge state for the viewer.
 
-The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unchanged.
+The GitLab CI driver (plus `ferry.webhook`'s pipeline trigger) still works as before; `ferry serve`
+can also run against GitLab instead of a GitHub App:
+
+## Running as a service (GitLab)
+
+`FERRY_VCS=gitlab ferry serve` (or just set `FERRY_GITLAB_URL`) is the same service with GitLab's
+webhook intake; the queue, worker, workspace, credentials and engine are shared.
+
+| Needs | From |
+|---|---|
+| GitLab base URL, e.g. `https://gitlab.example.com` | `FERRY_GITLAB_URL` |
+| the config project, `GROUP/NAME` or numeric id | `FERRY_GITLAB_PROJECT` |
+| a project access token, role **Developer**, scopes **`api`** (notes, approvals, members) and **`read_repository`** (checkouts) | `FERRY_GITLAB_TOKEN_FILE` (re-read on use, so it can be rotated) or `FERRY_GITLAB_TOKEN` |
+| the webhook's secret token | `FERRY_WEBHOOK_SECRET_FILE` or `FERRY_WEBHOOK_SECRET` |
+| the lock file, the default branch, OpenBao, drift | as for GitHub (`ferry serve --help`); the default branch defaults to the project's |
+
+Developer is enough because the service keeps locks in its SQLite file, not in tags (the CI driver
+still needs Maintainer for its tag locks). The token reaches git only as an `http.extraHeader`
+(Basic `oauth2:<token>`) in the environment, never in a URL, argv or `.git/config`.
+
+Webhook (project **Settings > Webhooks**): URL `https://ferry.example.com/webhook`, a **Secret
+token**, triggers **Merge request events** and **Comments**, **Enable SSL verification** on. GitLab
+doesn't sign the body; it sends the secret in `X-Gitlab-Token`, which ferry compares in constant
+time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (or
+`X-Gitlab-Event-UUID`); deliveries for another project are ignored.
+
+- **Plan** on open, reopen, a push of new commits and draft -> ready, under the same plan rule:
+  automatically only for MR authors with Developer+; anyone else's MR gets one note and waits for
+  `/ferry plan` from a Developer. Drafts and fork MRs (source project != target project) aren't
+  planned automatically. Close or merge releases the MR's locks.
+- **Apply** is `/ferry apply [inventory]`, with every gate above. Approvals count only for the
+  current head: GitLab doesn't record which commit an approval was for, so ferry counts an approval
+  only if its `approved_at` is at or after the moment the head arrived (the MR diff version whose
+  head is the MR's SHA). On a GitLab that doesn't report `approved_at`, approvals count only if the
+  project removes approvals when commits are added; otherwise none count (and the service logs why).
+- **Mergeability** comes from `detailed_merge_status`. `unchecked`, `checking` and `preparing` mean
+  GitLab hasn't decided yet: apply is refused, retry. A pending or failed MR pipeline
+  (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;
+  the CI driver ignores those two because its apply job is part of that pipeline.
 
 ## Playbooks run apart from the service (`ferry executor`)
 
