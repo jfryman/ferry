@@ -47,6 +47,11 @@ All re-checked inside the apply job, against live GitLab state:
   `ferry.yaml` (checked again at apply, so retargeting after the plan is refused). MRs into any
   other branch are never planned or applied: that branch's merge rules, usually none, would be the
   only review gate.
+- The MR is up to date with its target branch (`apply.require_up_to_date`, default on; Atlantis
+  `undiverged`): GitHub's compare API `behind_by`, GitLab's `diverged_commits_count`, read live at
+  apply. Ansible applies whole roles, so a branch that predates a merged change would put the hosts
+  back to the older state. A plan of a stale branch carries a warning so the author rebases before
+  review. If the code host can't say, the apply is refused.
 - MR open, not draft, no conflicts, blocking discussions resolved, not otherwise unmergeable
   (`ci_still_running` is fine: the apply job runs in that pipeline).
 - `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`). Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.

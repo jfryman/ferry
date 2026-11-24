@@ -72,6 +72,9 @@ class ApplyConfig:
     require_clean_plan: bool = True
     # A plan older than this must be re-run (hosts may have moved since).
     max_plan_age_hours: float = 24.0
+    # Refuse to apply a PR that is behind its base branch (Atlantis `undiverged`): ansible applies
+    # whole roles, so a stale branch would put the hosts back to what the base had before.
+    require_up_to_date: bool = True
 
 
 @dataclass

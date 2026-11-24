@@ -251,3 +251,31 @@ def test_lock_holder_lookup_errors_through_the_real_client(repo, tmp_path, statu
     out = Engine(cfg, repo, runner, be, locks, Redactor([], [], [], environ={}), lambda: 1.0).plan(1, "a" * 40, "bob")
     assert out.ok is taken
     assert locks.get("homelab").holder == (1 if taken else 2)
+
+
+def test_behind_by_uses_diverged_commits_count(gl):
+    from ferry.vcs.base import ChangeRequest
+    from ferry.vcs.gitlab import GitLabError
+    fake, client, be = gl
+    mr = {"iid": 7, "sha": "a" * 40, "source_branch": "f", "target_branch": "main", "author": {"username": "bob"},
+          "state": "opened", "diverged_commits_count": 2}
+    seen = []
+
+    def route(url, d):
+        seen.append(url)
+        return 200, mr
+    fake.routes[("GET", "/projects/infra%2Fansible/merge_requests/7")] = route
+    cr = ChangeRequest(7, "a" * 40, "f", "main", "bob", "opened")
+    assert be.behind_by(cr) == 2 and "include_diverged_commits_count=true" in seen[-1]
+    mr["diverged_commits_count"] = 0
+    assert be.behind_by(cr) == 0
+    del mr["diverged_commits_count"]
+    with pytest.raises(ValueError):
+        be.behind_by(cr)
+    mr["diverged_commits_count"] = 1
+    mr["sha"] = "b" * 40  # the MR moved while ferry looked: the count isn't about this head
+    with pytest.raises(ValueError):
+        be.behind_by(cr)
+    fake.routes[("GET", "/projects/infra%2Fansible/merge_requests/7")] = lambda u, d: (502, {})
+    with pytest.raises(GitLabError):
+        be.behind_by(cr)

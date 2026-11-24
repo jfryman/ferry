@@ -397,3 +397,60 @@ def test_base_branches_must_be_a_list_of_names(repo):
     (repo / "ferry.yaml").write_text("base_branches: release\n")
     with pytest.raises(ValueError, match="base_branches"):
         config.load(repo / "ferry.yaml")
+
+
+# ---- #23: apply needs the PR up to date with its base ------------------------------------------
+
+def test_a_pr_behind_its_base_is_planned_with_a_warning_and_not_applied(env):
+    cfg, vcs, locks, clock, make = env
+    planned_behind = vcs.behind
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml"])
+    vcs.approvals[1] = ["james"]
+    planned_behind[1] = 1
+    eng, _ = make(clean_plan_run())
+    out = eng.plan(1, SHA, "pip")
+    body = vcs.notes[1][-1].body
+    assert "1 commit(s) behind `main`" in body and "rebase" in body
+    eng, runner = make(clean_plan_run())
+    out = eng.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert any("rebase or merge `main`" in r for r in out.reasons), out.reasons
+
+
+def test_the_base_moving_between_plan_and_apply_refuses(env):
+    cfg, vcs, locks, clock, make = env
+    planned(env)
+    vcs.behind[1] = 2  # someone merged to main after the plan
+    eng, runner = make(clean_plan_run())
+    out = eng.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == [] and any("2 commit(s) behind" in r for r in out.reasons)
+
+
+def test_after_a_rebase_it_applies(env):
+    cfg, vcs, locks, clock, make = env
+    vcs.behind[1] = 0
+    planned(env)
+    eng, _ = make(clean_plan_run())
+    assert eng.apply(1, SHA, "james").ok
+
+
+def test_require_up_to_date_false_restores_the_old_behaviour(env):
+    cfg, vcs, locks, clock, make = env
+    cfg.apply.require_up_to_date = False
+    vcs.behind[1] = 3
+    planned(env)
+    assert "behind" not in vcs.notes[1][-1].body
+    eng, _ = make(clean_plan_run())
+    assert eng.apply(1, SHA, "james").ok
+
+
+@pytest.mark.parametrize("error", [GitHubError(500, "GET", "/compare", "x"), TimeoutError("slow"),
+                                   GitLabError(403, "GET", "/merge_requests/1", "x")])
+def test_an_unknown_divergence_refuses_apply(env, error):
+    cfg, vcs, locks, clock, make = env
+    planned(env)
+    vcs.behind[1] = error
+    eng, runner = make(clean_plan_run())
+    out = eng.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert any("couldn't tell whether" in r for r in out.reasons)

@@ -92,6 +92,14 @@ case "${1:-help}" in
             comment james "/ferry plan" >/dev/null; wait_idle >/dev/null
             expect base-branch-plan "targets .feature-x." "$(last_comment)"
             curl -s -X POST localhost:18999/_pr -d '{"base":"main"}' >/dev/null ;;
+  diverged) # #23: a PR behind main gets a warning on its plan and its apply is refused
+            curl -s -X POST localhost:18999/_pr -d '{"behind":1}' >/dev/null
+            comment james "/ferry plan" >/dev/null; wait_idle >/dev/null
+            expect diverged-plan-warning "1 commit\(s\) behind .main." "$(last_comment)"
+            curl -s -X POST localhost:18999/_approve -d '{"user":"james"}' >/dev/null
+            comment james "/ferry apply" >/dev/null; wait_idle >/dev/null
+            expect diverged-apply "refused.*rebase or merge .main." "$(last_comment | tr '\n' ' ')"
+            curl -s -X POST localhost:18999/_pr -d '{"behind":0}' >/dev/null ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;

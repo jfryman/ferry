@@ -1,7 +1,7 @@
 """A stand-in for api.github.com: just enough for ferry serve and one PR (number 1).
 
 State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_pr_state
-{"state": "closed"|"open"} closes or reopens the PR, /_pr {"base": NAME} retargets it. The branch has one ruleset (one approving review);
+{"state": "closed"|"open"} closes or reopens the PR, /_pr {"base": NAME} retargets it and /_pr {"behind": N} makes it N commits behind its base. The branch has one ruleset (one approving review);
 POST /_rules {"rules": [...]} replaces its rules (GitHub's /rules/branches shape), e.g. to require
 two approvals and watch apply refuse. Run with the ferry image's Python.
 """
@@ -14,7 +14,7 @@ R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
 WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip").split(","))
 # Like a fresh repo with one ruleset: one approving review on main.
-state = {"comments": [], "reviews": [], "pr_state": "open", "base": "main",
+state = {"comments": [], "reviews": [], "pr_state": "open", "base": "main", "behind": 0,
          "rules": [{"type": "pull_request", "ruleset_id": 1,
                     "parameters": {"required_approving_review_count": 1}}]}
 
@@ -80,6 +80,9 @@ class H(BaseHTTPRequestHandler):
             return self._j(200, {"name": "main", "protected": bool(state["rules"])})
         if p == f"{R}/branches/main/protection":
             return self._j(404, {"message": "Branch not protected"})  # rulesets only
+        if p.startswith(f"{R}/compare/"):
+            return self._j(200, {"status": "diverged" if state["behind"] else "ahead",
+                                 "behind_by": state["behind"], "ahead_by": 1})
         if p == "/_state":
             return self._j(200, state)
         self._j(404, {"message": "Not Found"})
@@ -102,11 +105,11 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/_pr_state":  # {"state": "closed"} before a close webhook, "open" to reopen
             state["pr_state"] = d.get("state", "open")
             return self._j(200, {"state": state["pr_state"]})
-        if self.path == "/_pr":  # {"base": "feature-x"}: retarget the PR
-            for k in ("base",):
+        if self.path == "/_pr":  # {"base": "feature-x"} retargets the PR, {"behind": 2} makes it stale
+            for k in ("base", "behind"):
                 if k in d:
                     state[k] = d[k]
-            return self._j(200, {k: state[k] for k in ("base",)})
+            return self._j(200, {k: state[k] for k in ("base", "behind")})
         if self.path == "/_approve":
             state["reviews"].append({"user": {"login": d.get("user", "james")}, "state": "APPROVED",
                                      "commit_id": head()})
