@@ -708,3 +708,48 @@ def test_an_unsigned_marker_from_the_bot_account_does_not_make_a_plan(world):
     world.deliver("Merge Request Hook", world.mr_event())
     world.drain()
     assert render.trusted_marker(world.notes[-1]["body"], world.svc.marker_key()) is not None
+
+
+# ---- #25 on GitLab: approvals from people who pushed to the MR --------------------------------------
+
+APPROVED_AFTER_HEAD = "2026-11-20T12:05:00Z"
+
+
+def test_a_developer_who_pushed_then_approved_does_not_count(world, monkeypatch):
+    from test_service import count_credentials
+    world.deliver("Merge Request Hook", world.mr_event())  # bob's MR
+    world.drain()
+    world.deliver("Merge Request Hook", world.mr_event("update", oldrev="1" * 40, user="alice"))  # alice pushes
+    world.drain()
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    minted = count_credentials(monkeypatch)
+    result, reasons = apply_reasons(world, "c1")
+    assert not result["ok"] and not minted
+    assert any("`alice` pushed or authored" in r for r in reasons), reasons
+
+
+def test_a_pusher_from_gitlabs_push_events_does_not_count(world):
+    world.gl.routes[("GET", f"{P}/events")] = [
+        {"action_name": "pushed to", "author": {"username": "alice"}, "push_data": {"ref": "feature", "ref_type": "branch"}}]
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    result, reasons = apply_reasons(world, "c2")
+    assert not result["ok"] and any("`alice`" in r for r in reasons)
+
+
+def test_an_unreadable_push_event_list_refuses(world):
+    world.gl.routes[("GET", f"{P}/events")] = lambda u, d: (500, {"message": "x"})
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    result, reasons = apply_reasons(world, "c3")
+    assert not result["ok"] and any("couldn't tell who pushed" in r for r in reasons)
+
+
+def test_an_approval_from_someone_who_never_pushed_still_applies(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    result, _ = apply_reasons(world, "c4")
+    assert result["ok"]

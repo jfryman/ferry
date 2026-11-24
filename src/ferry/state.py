@@ -34,6 +34,7 @@ class MemoryState:
         self._lock = threading.Lock()
         self._seen: OrderedDict[str, float] = OrderedDict()
         self._heads: dict[int, tuple[str, float]] = {}  # pr -> (head, when it became the head)
+        self._pushers: dict[int, set[str]] = {}  # pr -> users ferry saw push to it (#25)
 
     def first_sight(self, keys: list[str], now: float) -> bool:
         """Record these delivery keys; False if any of them was seen before (a duplicate)."""
@@ -74,6 +75,16 @@ class MemoryState:
             return cur[1] if cur and cur[0] == sha else None
 
 
+    def saw_pusher(self, pr: int, user: str, at: float) -> None:
+        """A webhook said `user` pushed to PR `pr`. Their approvals of it won't count."""
+        if user:
+            with self._lock:
+                self._pushers.setdefault(pr, set()).add(user)
+
+    def pushers(self, pr: int) -> set[str]:
+        with self._lock:
+            return set(self._pushers.get(pr, set()))
+
     def record_job(self, job: dict) -> int:
         """Append a finished job (JOB_FIELDS only), keeping the newest job_history."""
         with self._lock:
@@ -101,6 +112,8 @@ class SQLiteState(MemoryState):
             db.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT,"
                        " pr INTEGER, sha TEXT, user TEXT, inventory TEXT, result TEXT, started REAL, seconds REAL)")
             db.execute("CREATE TABLE IF NOT EXISTS heads (pr INTEGER PRIMARY KEY, sha TEXT NOT NULL, at REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS pushers (pr INTEGER NOT NULL, user TEXT NOT NULL, at REAL NOT NULL,"
+                       " PRIMARY KEY (pr, user))")
 
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None: we issue BEGIN IMMEDIATE ourselves. timeout waits out another writer.
@@ -150,6 +163,17 @@ class SQLiteState(MemoryState):
         with closing(self._connect()) as db:
             row = db.execute("SELECT at FROM heads WHERE pr = ? AND sha = ?", (pr, sha)).fetchone()
         return row[0] if row else None
+
+    def saw_pusher(self, pr, user, at):
+        if not user:
+            return
+        with closing(self._connect()) as db:
+            db.execute("INSERT OR REPLACE INTO pushers (pr, user, at) VALUES (?, ?, ?)", (pr, user, at))
+            db.execute("DELETE FROM pushers WHERE at < ?", (at - HEAD_TTL,))
+
+    def pushers(self, pr):
+        with closing(self._connect()) as db:
+            return {r[0] for r in db.execute("SELECT user FROM pushers WHERE pr = ?", (pr,))}
 
     def record_job(self, job):
         cols = JOB_FIELDS[1:]

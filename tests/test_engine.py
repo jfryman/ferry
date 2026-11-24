@@ -454,3 +454,54 @@ def test_an_unknown_divergence_refuses_apply(env, error):
     out = eng.apply(1, SHA, "james")
     assert not out.ok and runner.requests == []
     assert any("couldn't tell whether" in r for r in out.reasons)
+
+
+# ---- #25: an approval from someone who pushed to the PR doesn't count ----------------------------
+
+def contributed(env, contributors, approvals, author="alice", allow_author=False, pushers=()):
+    cfg, vcs, locks, clock, make = env
+    cfg.apply.allow_author_approval = allow_author
+    vcs.developers |= {"alice", "bob", "carol"}
+    vcs.add_cr(1, SHA, author=author, files=["inventories/homelab/host_vars/dns-1.yml"])
+    vcs.approvals[1] = list(approvals)
+    vcs.contributors_of[1] = contributors
+    eng, _ = make(clean_plan_run())
+    assert eng.plan(1, SHA, "pip").ok
+    eng, runner = make(clean_plan_run())
+    eng.pushers = lambda cr_id: set(pushers)
+    return eng.apply(1, SHA, "carol"), runner
+
+
+def test_an_approval_from_a_committer_is_refused_and_named(env):
+    out, runner = contributed(env, {"alice", "bob"}, ["bob"])
+    assert not out.ok and runner.requests == []
+    assert any("`bob`" in r and "pushed or authored" in r for r in out.reasons), out.reasons
+
+
+def test_an_approval_from_someone_else_counts(env):
+    out, _ = contributed(env, {"alice", "bob"}, ["carol"])
+    assert out.ok, out.reasons
+
+
+def test_author_only_with_another_approver_applies(env):
+    out, _ = contributed(env, {"alice"}, ["bob"])
+    assert out.ok, out.reasons
+
+
+def test_allow_author_approval_lets_contributors_count(env):
+    out, _ = contributed(env, {"alice", "bob"}, ["bob"], allow_author=True)
+    assert out.ok, out.reasons
+
+
+def test_a_pusher_ferry_saw_in_a_webhook_counts_as_a_contributor(env):
+    # bob pushed alice's commits (authorship says alice): the push is what ferry saw.
+    out, _ = contributed(env, {"alice"}, ["bob"], pushers={"bob"})
+    assert not out.ok and any("`bob`" in r for r in out.reasons)
+
+
+@pytest.mark.parametrize("error", [GitHubError(502, "GET", "/pulls/1/commits", "x"), TimeoutError("slow"),
+                                   GitLabError(403, "GET", "/events", "forbidden")])
+def test_unknown_contributors_refuse(env, error):
+    out, runner = contributed(env, error, ["carol"])
+    assert not out.ok and runner.requests == []
+    assert any("couldn't tell who pushed" in r for r in out.reasons)

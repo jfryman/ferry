@@ -97,6 +97,8 @@ class GitLabService(Service):
         if action in MR_CLOSE_ACTIONS:
             return self._enqueue(Job("unlock", iid, sha, delivery=delivery))
         new_commits = action == "update" and bool(mr.get("oldrev"))
+        if new_commits:  # whoever pushed: their approval of this MR won't count (#25)
+            self.state.saw_pusher(iid, (p.get("user") or {}).get("username") or "", self.clock())
         if not (action in MR_PLAN_ACTIONS or new_commits or
                 (action == "update" and _became_ready(p.get("changes") or {}))):
             return 202, f"ignored merge_request.{action}"

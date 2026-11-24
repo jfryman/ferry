@@ -54,7 +54,14 @@ All re-checked inside the apply job, against live GitLab state:
   review. If the code host can't say, the apply is refused.
 - MR open, not draft, no conflicts, blocking discussions resolved, not otherwise unmergeable
   (`ci_still_running` is fine: the apply job runs in that pipeline).
-- `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`). Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
+- `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`).
+  Nor does one from anyone who wrote part of the change: GitHub's commit author/committer logins
+  for the PR, GitLab's push events to the source branch (GitLab records the pusher itself; commit
+  author fields are whatever was typed), and every pusher ferry saw in a webhook. This is GitHub's
+  "approval of the most recent reviewable push" and GitLab's "prevent approvals by users who add
+  commits", held by ferry whether or not the code host has the rule on (GitLab CE doesn't).
+  `allow_author_approval: true` is the one opt-out, for solo repos. If the code host can't say who
+  pushed, no approval counts. Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
 - The person running it has Developer+ (or is in `apply.allowed_users`).
 - **GitHub: the code host's own rules would allow the merge**, on top of ferry's approval check
   (both must pass). See [GitHub branch protection and rulesets](#github-branch-protection-and-rulesets).

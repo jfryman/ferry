@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 REPO = os.environ.get("LAB_REPO", "acme/ansible")
 R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
-WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip").split(","))
+WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip,carol").split(","))
 # Like a fresh repo with one ruleset: one approving review on main.
 state = {"comments": [], "reviews": [], "pr_state": "open", "base": "main", "behind": 0,
          "rules": [{"type": "pull_request", "ruleset_id": 1,
@@ -69,6 +69,9 @@ class H(BaseHTTPRequestHandler):
             return self._j(200, [{"filename": "inventories/lab/host_vars/target.yml"}] if first else [])
         if p == f"{R}/issues/1/comments":
             return self._j(200, state["comments"] if first else [])
+        if p == f"{R}/pulls/1/commits":  # who GitHub links the PR's commits to (#25)
+            return self._j(200, [{"sha": head(), "author": {"login": "pip"}, "committer": {"login": "pip"}}]
+                           if first else [])
         if p == f"{R}/pulls/1/reviews":
             return self._j(200, state["reviews"] if first else [])
         if p.startswith(f"{R}/collaborators/"):

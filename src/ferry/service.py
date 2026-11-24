@@ -276,6 +276,8 @@ class Service:
             return 202, stale
         # When this head arrived, for pinning comments to the head their author saw (#12).
         self.state.saw_head(number, sha, parse_time(pr["updated_at"]))
+        if action == "synchronize":  # whoever pushed: their approval of this PR won't count (#25)
+            self.state.saw_pusher(number, (p.get("sender") or {}).get("login") or "", self.clock())
         if action == "closed":
             return self._enqueue(Job("unlock", number, sha, author, delivery=delivery))
         if action not in PLAN_ACTIONS:
@@ -490,7 +492,8 @@ class Service:
         red = self._redactor(cfg, env)
         return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
                       clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved",
-                      default_branch=self.settings.default_branch, marker_key=self.marker_key())
+                      default_branch=self.settings.default_branch, marker_key=self.marker_key(),
+                      pushers=self.state.pushers)
 
     def _report_moved(self, job: Job, why: str) -> None:
         self._report_not_run(job, f"{why}. Nothing ran against the hosts. Read the new commits, then "
@@ -529,7 +532,7 @@ class Service:
                 # plan) costs no OpenBao login and no certificate. apply() checks again with them.
                 pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
                              clock=self.clock, default_branch=self.settings.default_branch,
-                             marker_key=self.marker_key())
+                             marker_key=self.marker_key(), pushers=self.state.pushers)
                 for inv in invs:
                     out = pre.apply_precheck(job.pr, job.sha, job.user, inv)
                     if out is not None:

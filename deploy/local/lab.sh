@@ -16,7 +16,7 @@ deliver() {  # deliver EVENT BODY [DELIVERY-ID]; keeps the last one in $LAB/last
     -H "X-Hub-Signature-256: $sig" -H "Content-Type: application/json" --data-binary "$2"
 }
 pr_event() {  # pr_event ACTION AUTHOR
-  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"pull_request\":{\"number\":1,\"draft\":false,\"base\":{\"ref\":\"${BASE:-main}\"},\"updated_at\":\"$(now)\",\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
+  deliver pull_request "{\"action\":\"$1\",\"repository\":{\"full_name\":\"$REPO\"},\"sender\":{\"login\":\"${SENDER:-$2}\"},\"pull_request\":{\"number\":1,\"draft\":false,\"base\":{\"ref\":\"${BASE:-main}\"},\"updated_at\":\"$(now)\",\"user\":{\"login\":\"$2\"},\"head\":{\"sha\":\"$(cat "$LAB/pr_head")\",\"repo\":{\"full_name\":\"$REPO\"}}}}"
 }
 comment() {  # comment USER BODY
   deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"$1\"},\"body\":\"$2\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
@@ -49,7 +49,7 @@ case "${1:-help}" in
             git -C "$LAB/src" push -q "$LAB/remote/acme/ansible.git" feature
             git -C "$LAB/remote/acme/ansible.git" update-ref refs/pull/1/head "$(git -C "$LAB/src" rev-parse HEAD)"
             git -C "$LAB/src" rev-parse HEAD > "$LAB/pr_head"
-            pr_event synchronize pip; echo; wait_idle ;;
+            SENDER=${SENDER:-pip} pr_event synchronize pip; echo; wait_idle ;;
   close)    curl -s -X POST localhost:18999/_pr_state -d '{"state":"closed"}' >/dev/null
             pr_event closed pip; echo; wait_idle ;;
   replay)   # re-send the last delivery's exact signed body under a new delivery id: expect a duplicate
@@ -105,6 +105,13 @@ case "${1:-help}" in
             deliver issue_comment "$body" >/dev/null
             again=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=1, sort_keys=True))')
             expect replay-comment "^duplicate comment$" "$(deliver issue_comment "$again" "fresh-$(date +%s%N)")" ;;
+  pusher-approval) # #25: carol pushes to pip's PR and approves it; her approval doesn't count
+            SENDER=carol "$0" push "pushed by carol" >/dev/null
+            curl -s -X POST localhost:18999/_approve -d '{"user":"carol"}' >/dev/null
+            comment james "/ferry apply" >/dev/null; wait_idle >/dev/null
+            expect pusher-approval "approval from .carol. doesn't count" "$(last_comment)" ;;
+  security) # every security scenario, in an order that leaves the PR usable
+            for s in closed-plan base-branch diverged replay-comment pusher-approval; do "$0" "$s"; done ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;
