@@ -102,6 +102,20 @@ def delivery_keys(delivery: str, body: bytes) -> list[str]:
     return ([f"id:{delivery}"] if delivery else []) + ["body:" + hashlib.sha256(body).hexdigest()]
 
 
+COMMANDS = ("plan", "apply")
+
+
+def parse_allow_commands(value: str | None) -> tuple:
+    """FERRY_ALLOW_COMMANDS: comma-separated commands; unset means all of them."""
+    if value is None:
+        return COMMANDS
+    items = [x.strip().lower() for x in value.split(",") if x.strip()]
+    bad = [x for x in items if x not in COMMANDS]
+    if bad:
+        raise ValueError(f"FERRY_ALLOW_COMMANDS: unknown command(s) {bad}; known: {list(COMMANDS)}")
+    return tuple(dict.fromkeys(items))
+
+
 def _valid_id(value) -> bool:
     """A code host object id: a positive int (JSON true is not one)."""
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
@@ -176,6 +190,12 @@ class Settings:
     galaxy_timeout_seconds: float = 300.0
     collections_max_age_days: float = 14.0
     executor_socket: str | None = None
+    # Switches (#28), set by the operator, never by a repo: which comment commands this ferry takes
+    # (FERRY_ALLOW_COMMANDS), automatic plans off (FERRY_DISABLE_AUTOPLAN), and a directory whose
+    # `disable-apply` / `disable-autoplan` files switch those off while the service runs.
+    allow_commands: tuple = ("plan", "apply")
+    disable_autoplan: bool = False
+    switch_dir: str | None = None
 
 
 @dataclass
@@ -219,7 +239,66 @@ class Service:
         if reason:
             self.metrics.inc("ferry_webhook_rejected_total", reason=reason)
 
+    # ---- switches (#28) ------------------------------------------------------------------------
+
+    def _switch(self, name: str) -> tuple[bool, str]:
+        """(on, reason) for the operator's switch file `name` in switch_dir. Read on every request,
+        so `touch` and `rm` take effect at once. A directory ferry can't check counts as on."""
+        d = self.settings.switch_dir
+        if not d:
+            return False, ""
+        path = os.path.join(d, name)
+        try:
+            if not os.path.lexists(path):
+                return False, ""
+        except OSError:
+            return True, f"can't check {path}"
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                note = fh.readline(201).strip()
+        except OSError:
+            note = ""
+        return True, note or f"{path} exists"
+
+    def switches(self) -> dict:
+        """What this ferry does right now: {"plan", "apply", "autoplan": bool, "why": {off: reason}}."""
+        st, why = self.settings, {}
+        on = {c: c in st.allow_commands for c in COMMANDS}
+        for c in COMMANDS:
+            if not on[c]:
+                why[c] = "FERRY_ALLOW_COMMANDS"
+        frozen, reason = self._switch("disable-apply")
+        if on["apply"] and frozen:
+            on["apply"], why["apply"] = False, reason
+        auto = on["plan"]
+        if not on["plan"]:
+            why["autoplan"] = "plan is disabled"
+        elif st.disable_autoplan:
+            auto, why["autoplan"] = False, "FERRY_DISABLE_AUTOPLAN"
+        else:
+            off, reason = self._switch("disable-autoplan")
+            if off:
+                auto, why["autoplan"] = False, reason
+        return {"apply": on["apply"], "autoplan": auto, "plan": on["plan"], "why": why}
+
+    def _disabled(self, action: str) -> str | None:
+        """Why `action` won't run on this ferry now, as the note says it; None if it may."""
+        sw = self.switches()
+        if action in COMMANDS and not sw[action]:
+            why = sw["why"].get(action, "")
+            if why.startswith(("FERRY_", "/", "can't check")) or why.endswith(" exists"):
+                why = "the operator switched them off"  # paths and variable names stay in the log
+            from .render import inline
+            return f"{ {'apply': 'applies', 'plan': 'plans'}[action]} are disabled on this ferry: {inline(why)}"
+        return None
+
     def render_metrics(self) -> str:
+        try:
+            sw = self.switches()
+            for k in ("plan", "apply", "autoplan"):
+                self.metrics.set("ferry_enabled", 1.0 if sw[k] else 0.0, switch=k)
+        except Exception:  # never fail the endpoint
+            log.exception("couldn't read the switches")
         count = getattr(self.locks, "count", None)
         live = {"ferry_queue_depth": self.jobs.qsize}
         if count is not None:
@@ -290,6 +369,8 @@ class Service:
             return self._enqueue(Job("unlock", number, sha, author, delivery=delivery))
         if action not in PLAN_ACTIONS:
             return 202, f"ignored pull_request.{action}"
+        if not self.switches()["autoplan"]:
+            return 202, "autoplan disabled"
         if pr.get("draft"):
             return 202, "draft: not planned"
         # A deleted fork has head.repo null: a fork all the same.
@@ -333,6 +414,10 @@ class Service:
         if not self.vcs.can_apply(user):
             self.vcs.post_note(number, f"`/ferry {action}` needs write access to this repo; @{user} doesn't have it.")
             return 202, f"{action} refused: no write access"
+        off = self._disabled(action)
+        if off:
+            self.vcs.post_note(number, f"`/ferry {action}` didn't run: {off}.")
+            return 202, f"{action} refused: disabled"
         cr = self.vcs.get_change_request(number)
         if not self._open_or_say(cr, action):
             return 202, f"{action} refused: {self.noun} is {cr.state}"
@@ -418,7 +503,14 @@ class Service:
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
         try:
-            if job.action == "unlock":
+            off = self._disabled(job.action) if job.action in COMMANDS else None
+            if job.action == "plan" and not job.pinned and not self.switches()["autoplan"]:
+                result.update(error="autoplan disabled", skipped=True)  # switched off while queued
+            elif off:  # switched off while the job waited in the queue: nothing runs
+                result.update(inventories={"*": {"ok": False, "reasons": [off]}})
+                if job.pr:
+                    self._report_not_run(job, f"{off}. Nothing ran against the hosts.")
+            elif job.action == "unlock":
                 result.update(self._unlock(job))
             elif job.action == "drift":
                 result.update(self._drift())
@@ -656,7 +748,9 @@ def make_handler(service: Service, max_body: int | None = None):
             if path == "/healthz":
                 # No error text here: it can name internal hosts and paths, and /healthz is unauthenticated.
                 last = {k: service.last_job[k] for k in ("job", "pr", "ok", "seconds") if k in service.last_job}
-                self._send(200, json.dumps({"ok": True, "queued": service.jobs.qsize(), "last_job": last}))
+                sw = service.switches()
+                self._send(200, json.dumps({"ok": True, "queued": service.jobs.qsize(), "last_job": last,
+                                            "switches": {k: sw[k] for k in ("plan", "apply", "autoplan")}}))
             elif path == "/metrics":
                 self._send(200, service.render_metrics().rstrip("\n"), "text/plain; version=0.0.4; charset=utf-8")
             elif path == "/jobs":

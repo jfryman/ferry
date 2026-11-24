@@ -153,6 +153,11 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
   FERRY_GALAXY_TIMEOUT_SECONDS   300 (default): kill ansible-galaxy (and what it started) after this
   FERRY_COLLECTIONS_MAX_AGE_DAYS 14 (default): prune collection caches unused this long (0: never)
   FERRY_GIT_TIMEOUT_SECONDS      300 (default): any one git fetch/checkout
+  FERRY_ALLOW_COMMANDS           plan,apply (default): comment commands this ferry takes; `plan`
+                                 alone makes it plan-only
+  FERRY_DISABLE_AUTOPLAN         1: plan only on `/ferry plan`, never on push
+  FERRY_SWITCH_DIR               where `disable-apply` / `disable-autoplan` switch files live
+                                 (default: FERRY_LOCK_DB's directory); see `ferry switch --help`
   FERRY_JOB_TIMEOUT_MINUTES      kill a plan/apply/drift run after this long (0: no limit); keep it
                                  below the certificate TTL
   FERRY_EXECUTOR_SOCKET          run playbooks in `ferry executor` (a separate user/container that
@@ -256,7 +261,9 @@ def build_service(vcs: str | None = None):
                   galaxy=_env("FERRY_GALAXY", "install"), galaxy_server=_env("FERRY_GALAXY_SERVER"),
                   galaxy_timeout_seconds=float(_env("FERRY_GALAXY_TIMEOUT_SECONDS", "300")),
                   collections_max_age_days=float(_env("FERRY_COLLECTIONS_MAX_AGE_DAYS", "14")),
-                  executor_socket=_env("FERRY_EXECUTOR_SOCKET"))
+                  executor_socket=_env("FERRY_EXECUTOR_SOCKET"),
+                  allow_commands=_allow_commands(), disable_autoplan=_env("FERRY_DISABLE_AUTOPLAN") in ("1", "true", "yes"),
+                  switch_dir=_switch_dir())
     if common["galaxy"] not in ("install", "skip"):
         sys.exit("ferry serve: FERRY_GALAXY must be install or skip")
     workdir = _env("FERRY_WORKDIR", "/var/lib/ferry/work")
@@ -314,6 +321,59 @@ def _build_gitlab_service(required: dict, secret: str, token, common: dict, work
         bao=_openbao(),
         **_runner_factory(),
     )
+
+
+def _allow_commands() -> tuple:
+    from .service import parse_allow_commands
+    try:
+        return parse_allow_commands(os.environ.get("FERRY_ALLOW_COMMANDS"))
+    except ValueError as e:
+        sys.exit(f"ferry serve: {e}")
+
+
+def _switch_dir() -> str | None:
+    """FERRY_SWITCH_DIR, else the state file's directory (on the persistent volume)."""
+    d = _env("FERRY_SWITCH_DIR")
+    if d:
+        return d
+    db = _env("FERRY_LOCK_DB")
+    return str(Path(db).parent) if db else None
+
+
+SWITCH_HELP = """Switch applies or automatic plans off (or back on) on a running `ferry serve`, without a restart.
+
+  ferry switch apply off --reason "change freeze until Monday"
+  ferry switch autoplan off
+  ferry switch apply on
+  ferry switch                      # show the switch files
+
+Writes or removes `disable-apply` / `disable-autoplan` in FERRY_SWITCH_DIR (default: the directory
+of FERRY_LOCK_DB). Run it where the service's state volume is mounted, e.g.
+`kubectl exec deploy/ferry -c ferry -- ferry switch apply off --reason "incident"`. The service reads
+the files on every request and again before each queued job runs; the reason is shown on the PR.
+"""
+
+
+def run_switch(args) -> int:
+    d = _switch_dir()
+    if not d:
+        sys.exit("ferry switch: set FERRY_SWITCH_DIR or FERRY_LOCK_DB")
+    if not args.what:
+        for name in ("disable-apply", "disable-autoplan"):
+            path = Path(d) / name
+            print(f"{name}: {'ON (' + (path.read_text().strip() or 'no reason') + ')' if path.exists() else 'off'}")
+        return 0
+    if args.state is None:
+        sys.exit("ferry switch: say on or off")
+    path = Path(d) / f"disable-{args.what}"
+    if args.state == "off":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text((args.reason or f"{args.what} switched off by an operator") + "\n")
+        print(f"{args.what}: switched off ({path})")
+    else:
+        path.unlink(missing_ok=True)
+        print(f"{args.what}: switched on")
+    return 0
 
 
 def _git_timeout() -> float:
@@ -404,11 +464,19 @@ def main(argv: list[str] | None = None) -> int:
                    formatter_class=argparse.RawDescriptionHelpFormatter)
     sub.add_parser("executor", help="run serve's playbooks as a separate, unprivileged user",
                    description=EXECUTOR_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s = sub.add_parser("switch", help="switch applies or automatic plans off/on on a running service",
+                       description=SWITCH_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("what", nargs="?", choices=("apply", "autoplan"))
+    s.add_argument("state", nargs="?", choices=("on", "off"))
+    s.add_argument("--reason", help="shown on the PR when a command is refused")
 
     args = p.parse_args(argv)
 
     if args.cmd == "executor":
         return run_executor()
+
+    if args.cmd == "switch":
+        return run_switch(args)
 
     if args.cmd == "serve":
         from .service import serve

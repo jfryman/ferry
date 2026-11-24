@@ -259,6 +259,33 @@ fresh key is refused as `duplicate comment` (GitHub comments likewise, on the co
   (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;
   the CI driver ignores those two because its apply job is part of that pipeline.
 
+## Switching applies off (`ferry serve`)
+
+For an incident, a change freeze or a suspected compromise of a writer's account, without stopping
+the service (locks are still released on close and drift still runs):
+
+| Switch | How | Effect |
+|---|---|---|
+| `FERRY_ALLOW_COMMANDS=plan` | environment (restart) | plan-only ferry: `/ferry apply` is refused |
+| `FERRY_DISABLE_AUTOPLAN=1` | environment (restart) | plans only on `/ferry plan`, never on push |
+| `disable-apply` file | `ferry switch apply off --reason "..."` | applies refused at once, queued ones too |
+| `disable-autoplan` file | `ferry switch autoplan off` | pushes no longer plan, queued autoplans dropped |
+
+The files live in `FERRY_SWITCH_DIR` (default: the directory of `FERRY_LOCK_DB`, on the state
+volume). ferry checks them on every webhook and again before each queued job runs, so a switch also
+stops jobs already in the queue; a directory it can't check counts as switched off. In Kubernetes:
+
+```sh
+kubectl -n ferry exec deploy/ferry -c ferry -- ferry switch apply off --reason "change freeze until Monday"
+kubectl -n ferry exec deploy/ferry -c ferry -- ferry switch            # show
+kubectl -n ferry exec deploy/ferry -c ferry -- ferry switch apply on
+```
+
+A refused command gets a note on the PR ("applies are disabled on this ferry: change freeze until
+Monday"). `GET /healthz` shows `"switches": {"plan": true, "apply": false, "autoplan": true}` and
+`/metrics` has `ferry_enabled{switch="apply"}`. None of this is in `ferry.yaml`, so a merge can't
+flip it.
+
 ## Observability (`ferry serve`)
 
 Both backends serve, on the same port as the webhook:

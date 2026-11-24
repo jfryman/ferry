@@ -102,6 +102,8 @@ class GitLabService(Service):
         if not (action in MR_PLAN_ACTIONS or new_commits or
                 (action == "update" and _became_ready(p.get("changes") or {}))):
             return 202, f"ignored merge_request.{action}"
+        if not self.switches()["autoplan"]:
+            return 202, "autoplan disabled"
         if mr.get("draft") or mr.get("work_in_progress"):
             return 202, "draft: not planned"
         if mr.get("source_project_id") != mr.get("target_project_id"):
@@ -147,6 +149,10 @@ class GitLabService(Service):
         if not self.vcs.can_apply(user):
             self.vcs.post_note(iid, f"`/ferry {action}` needs Developer access to this project; @{user} doesn't have it.")
             return 202, f"{action} refused: no Developer access"
+        off = self._disabled(action)
+        if off:
+            self.vcs.post_note(iid, f"`/ferry {action}` didn't run: {off}.")
+            return 202, f"{action} refused: disabled"
         cr = self.vcs.get_change_request(iid)
         if not self._open_or_say(cr, action):
             return 202, f"{action} refused: {self.noun} is {cr.state}"
