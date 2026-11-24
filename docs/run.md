@@ -16,6 +16,7 @@ follow up with a pull request that records what changed. What still holds:
 The operator never holds a long-lived SSH credential. The service signs a short certificate for
 one run, after it has verified who is asking.
 
+- [Install](#install)
 - [Usage](#usage)
 - [What the CLI does](#what-the-cli-does)
 - [Enabling the run API](#enabling-the-run-api)
@@ -26,6 +27,25 @@ one run, after it has verified who is asking.
 - [The run API](#the-run-api)
 - [Limits you should know](#limits-you-should-know)
 - [Demo login with an admin-created token](#demo-login-with-an-admin-created-token)
+
+## Install
+
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install jfryman/tap/ferry
+```
+
+Without Homebrew, use pipx with a release tag. Don't install `ferry` from PyPI: that is an
+unrelated project.
+
+```bash
+pipx install 'git+https://github.com/jfryman/ferry@vX.Y.Z'
+```
+
+Neither installs Ansible. Install the `ansible-core` version your repository pins, for example
+`pipx install 'ansible-core~=2.20.0'`, so that `ansible-playbook` is on your `PATH`. The other
+requirements are below.
 
 ## Usage
 
