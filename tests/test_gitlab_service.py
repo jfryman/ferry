@@ -118,10 +118,12 @@ class World:
                 "project": project or {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": attrs, "changes": changes or {}}
 
-    def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None, head=None):
+    def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None, head=None, nid=None):
+        self._nid = getattr(self, "_nid", 5000) + 1  # every note is a new note unless nid says
         return {"object_kind": "note", "user": {"username": user},
                 "project": {"id": 9, "path_with_namespace": "acme/ansible"},
-                "object_attributes": {"note": note, "noteable_type": noteable, "action": "create",
+                "object_attributes": {"id": self._nid if nid is None else nid,
+                                      "note": note, "noteable_type": noteable, "action": "create",
                                       "created_at": at, "updated_at": updated or at},
                 "merge_request": {"iid": 1, "state": "opened", "last_commit": {"id": head or self.sha}}}
 
@@ -635,3 +637,57 @@ def test_main_moving_after_the_plan_refuses_the_mr_apply(world, monkeypatch):
     minted = count_credentials(monkeypatch)
     result, reasons = apply_reasons(world, "b3")
     assert not result["ok"] and not minted and any("3 commit(s) behind" in r for r in reasons)
+
+
+# ---- #37: a note triggers at most one job --------------------------------------------------------
+
+def test_a_note_replayed_with_a_fresh_idempotency_key_and_new_bytes_is_refused(world):
+    ev = world.note_event("/ferry plan", nid=777)
+    first = json.dumps(ev).encode()
+    assert world.svc.handle("Note Hook", "key-1", SECRET.decode(), first) == (202, "plan queued")
+    again = json.dumps(ev, indent=2, sort_keys=True).encode()
+    assert world.svc.handle("Note Hook", "key-2", SECRET.decode(), again) == (200, "duplicate comment")
+    assert world.svc.jobs.qsize() == 1
+
+
+def test_the_same_note_id_in_another_project_is_not_a_duplicate(world):
+    # Key is per project: GitLab note ids are global today, but the key doesn't rely on it.
+    a = world.svc._comment_key("note", 9, 777)
+    b = world.svc._comment_key("note", 10, 777)
+    assert a != b
+
+
+@pytest.mark.parametrize("nid", [None, "", "7", 0, False])
+def test_a_note_command_without_a_usable_id_is_refused(world, nid):
+    ev = world.note_event("/ferry plan")
+    if nid is None:
+        del ev["object_attributes"]["id"]
+    else:
+        ev["object_attributes"]["id"] = nid
+    status, text = world.deliver("Note Hook", ev)
+    assert status == 400 and "note id" in text and world.svc.jobs.empty()
+
+
+def test_a_replayed_apply_note_after_a_refusal_posts_nothing_new(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    ev = world.note_event("/ferry apply", nid=31337)
+    world.svc.handle("Note Hook", "k1", SECRET.decode(), json.dumps(ev).encode())
+    world.drain()
+    n = len(world.notes)
+    assert world.svc.handle("Note Hook", "k2", SECRET.decode(),
+                            json.dumps(ev, separators=(",", ":")).encode())[1] == "duplicate comment"
+    assert world.svc.jobs.empty() and len(world.notes) == n
+
+
+def test_a_note_that_failed_mid_check_can_be_redelivered(world):
+    from ferry.vcs.gitlab import GitLabError
+    ev = world.note_event("/ferry plan", nid=4040)
+    body = json.dumps(ev).encode()
+    route = world.gl.routes[("GET", MR)]
+    world.gl.routes[("GET", MR)] = lambda u, d: (502, {"message": "bad gateway"})
+    with pytest.raises(GitLabError):
+        world.svc.handle("Note Hook", "r-1", SECRET.decode(), body)
+    world.gl.routes[("GET", MR)] = route
+    assert world.svc.handle("Note Hook", "r-2", SECRET.decode(), json.dumps(ev, indent=1).encode()) == \
+        (202, "plan queued")

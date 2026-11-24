@@ -33,7 +33,7 @@ def reject_reason(status: int, text: str) -> str | None:
     t = text or ""
     rules = (
         (status == 401, "bad_auth"),
-        (t == "duplicate delivery", "duplicate"),
+        (t in ("duplicate delivery", "duplicate comment"), "duplicate"),
         (t.startswith("stale event"), "stale"),
         (t == "event timestamp is in the future", "future"),
         (t == "event has no readable timestamp", "undated"),

@@ -29,7 +29,7 @@ import hmac
 import json
 import logging
 
-from .service import Job, Service, parse_time
+from .service import Job, Service, _valid_id, parse_time
 from .webhook import COMMAND_RE
 
 log = logging.getLogger("ferry.gitlab_service")
@@ -130,6 +130,14 @@ class GitLabService(Service):
         stale = self._stale(note.get("created_at"), note.get("updated_at"))
         if stale:
             return 202, stale
+        if not _valid_id(note.get("id")):
+            return 400, "note id missing or malformed"
+        project = (p.get("project") or {}).get("id") or self.settings.project_id or self.settings.repo.lower()
+        return self._once(self._comment_key("note", project, note["id"]), lambda: self._on_note_command(p, m, delivery))
+
+    def _on_note_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
+        note = p["object_attributes"]
+        user = (p.get("user") or {}).get("username", "")
         action, inventory, named = m.group(1), m.group(2), m.group(3)
         iid = int(p["merge_request"]["iid"])
         # Both commands need Developer access, checked here: a refused request never costs a checkout

@@ -216,7 +216,9 @@ Webhook (project **Settings > Webhooks**): URL `https://ferry.example.com/webhoo
 token**, triggers **Merge request events** and **Comments**, **Enable SSL verification** on. GitLab
 doesn't sign the body; it sends the secret in `X-Gitlab-Token`, which ferry compares in constant
 time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (or
-`X-Gitlab-Event-UUID`) and on the body, in the state file; notes and MR events older than
+`X-Gitlab-Event-UUID`) and on the body, in the state file. A note triggers at most one job:
+commands are also deduped on the note id (`note:<project>:<id>`), so a replay re-encoded under a
+fresh key is refused as `duplicate comment` (GitHub comments likewise, on the comment id). Notes and MR events older than
 `FERRY_WEBHOOK_MAX_AGE_MINUTES` are refused; deliveries for another project are ignored.
 
 - **Plan** on open, reopen, a push of new commits and draft -> ready, under the same plan rule:

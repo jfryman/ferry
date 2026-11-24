@@ -126,10 +126,12 @@ class World:
                                  "base": {"ref": base or self.base},
                                  "head": {"sha": self.sha, "repo": repo}}}
 
-    def comment_event(self, body, user="james", at=NOW_ISO, updated=None):
+    def comment_event(self, body, user="james", at=NOW_ISO, updated=None, cid=None):
+        self._cid = getattr(self, "_cid", 1000) + 1  # every comment is a new comment unless cid says
         return {"action": "created", "repository": {"full_name": "acme/ansible"},
                 "issue": {"number": 1, "pull_request": {}},
-                "comment": {"user": {"login": user}, "body": body, "created_at": at, "updated_at": updated or at}}
+                "comment": {"id": self._cid if cid is None else cid, "user": {"login": user}, "body": body,
+                            "created_at": at, "updated_at": updated or at}}
 
     def drain(self):
         out = []
@@ -768,3 +770,67 @@ def test_a_compare_api_error_refuses_the_apply(world, monkeypatch):
     [refused] = world.drain()
     assert not refused["ok"] and not minted
     assert any("couldn't tell" in r for r in refused["inventories"]["homelab"]["reasons"])
+
+
+# ---- #37: a comment triggers at most one job -----------------------------------------------------
+
+def reserialized(payload: dict) -> bytes:
+    """The same JSON, different bytes (what a replayer that re-encodes the body sends)."""
+    return json.dumps(payload, indent=1, sort_keys=True).encode()
+
+
+def test_a_comment_replayed_with_a_fresh_delivery_id_and_new_bytes_is_refused(world):
+    ev = world.comment_event("/ferry plan", cid=4242)
+    first = json.dumps(ev).encode()
+    assert world.svc.handle("issue_comment", "d-1", sign(first), first) == (202, "plan queued")
+    again = reserialized(ev)
+    assert again != first
+    status, text = world.svc.handle("issue_comment", "d-2", sign(again), again)
+    assert (status, text) == (200, "duplicate comment")
+    assert world.svc.jobs.qsize() == 1
+
+
+def test_two_comments_with_the_same_text_are_two_commands(world):
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+
+
+def test_the_comment_id_survives_a_restart(world, tmp_path):
+    from ferry.state import SQLiteState
+    world.svc.state = SQLiteState(tmp_path / "state.db")
+    world.svc.state.saw_head(1, world.sha, NOW - 120)
+    ev = world.comment_event("/ferry plan", cid=7)
+    b1 = json.dumps(ev).encode()
+    world.svc.handle("issue_comment", "d-1", sign(b1), b1)
+    world.svc.state = SQLiteState(tmp_path / "state.db")  # a new process, same state file
+    b2 = reserialized(ev)
+    assert world.svc.handle("issue_comment", "d-2", sign(b2), b2)[1] == "duplicate comment"
+
+
+def test_a_comment_refused_for_a_full_queue_can_be_retried(world):
+    world.svc.jobs = __import__("queue").Queue(maxsize=1)
+    world.svc.jobs.put(Job("drift"))
+    ev = world.comment_event("/ferry plan", cid=9)
+    b1 = json.dumps(ev).encode()
+    assert world.svc.handle("issue_comment", "d-1", sign(b1), b1)[0] == 503
+    world.svc.jobs.get()
+    assert world.svc.handle("issue_comment", "d-1", sign(b1), b1)[1] == "plan queued"
+
+
+@pytest.mark.parametrize("cid", [None, "", "7", 0, -1, True])
+def test_a_command_without_a_usable_comment_id_is_refused(world, cid):
+    ev = world.comment_event("/ferry plan")
+    if cid is None:
+        del ev["comment"]["id"]
+    else:
+        ev["comment"]["id"] = cid
+    status, text = world.deliver("issue_comment", ev)
+    assert status == 400 and "comment id" in text and world.svc.jobs.empty()
+
+
+def test_duplicate_comments_are_counted(world):
+    ev = world.comment_event("/ferry plan", cid=11)
+    b1, b2 = json.dumps(ev).encode(), reserialized(ev)
+    world.svc.receive({"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "a", "X-Hub-Signature-256": sign(b1)}, b1)
+    world.svc.receive({"X-GitHub-Event": "issue_comment", "X-GitHub-Delivery": "b", "X-Hub-Signature-256": sign(b2)}, b2)
+    assert 'ferry_webhook_rejected_total{reason="duplicate"} 1' in world.svc.render_metrics()

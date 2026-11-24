@@ -100,6 +100,11 @@ case "${1:-help}" in
             comment james "/ferry apply" >/dev/null; wait_idle >/dev/null
             expect diverged-apply "refused.*rebase or merge .main." "$(last_comment | tr '\n' ' ')"
             curl -s -X POST localhost:18999/_pr -d '{"behind":0}' >/dev/null ;;
+  replay-comment) # #37: the same comment re-encoded (new bytes) under a fresh delivery id is refused
+            body="{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"mallory\"},\"body\":\"/ferry plan\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
+            deliver issue_comment "$body" >/dev/null
+            again=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=1, sort_keys=True))')
+            expect replay-comment "^duplicate comment$" "$(deliver issue_comment "$again" "fresh-$(date +%s%N)")" ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;
