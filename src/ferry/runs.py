@@ -1,6 +1,7 @@
 """Service-owned operator leases. SQLite holds metadata only, never credentials or identity tokens."""
 import base64
 import json
+import logging
 import re
 import sqlite3
 import struct
@@ -10,7 +11,6 @@ from contextlib import closing
 from pathlib import Path
 
 from . import config
-from .locks import new_lock
 from .run_identity import IdentityVerifier, IdentityError
 from .workspace import Workspace
 
@@ -137,7 +137,8 @@ class Runs:
             return 401, {'error': 'invalid identity token'}
         except RunError as e:
             return e.status, {'error': e.text}
-        except Exception:
+        except Exception as e:
+            logging.getLogger("ferry.runs").warning("run unavailable (%s)", type(e).__name__)
             # Never echo upstream errors or bodies containing credentials.
             return 503, {'error': 'run unavailable'}
 
@@ -178,17 +179,27 @@ class Runs:
             raise RunError(403, 'inventory not allowed')
         rid = uuid.uuid4().hex
         holder = f"run:{rid} ({claims['sub']})"
-        held = svc.locks.try_acquire(new_lock(inv.name, holder, data['sha'], claims['sub']))
-        if held:
-            raise RunError(409, f'locked by {held.holder}')
+        run = dict(run_id=rid, holder=holder, subject=claims['sub'], inventory=inv.name,
+                   limit=limit, mode=data['mode'], sha=data['sha'], started=now,
+                   certificate_serial=None, certificate_expires_at=now + svc.settings.run_lease_seconds,
+                   lease_expires_at=now + svc.settings.run_lease_seconds)
+        # Same table/transaction as PR locks. Persist the initial lease atomically with acquire:
+        # a service crash between separate inserts must not leave an immortal operator holder.
+        with closing(self.db()) as db:
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                held = db.execute('SELECT holder FROM locks WHERE key = ?', (inv.name,)).fetchone()
+                if held:
+                    raise RunError(409, f'locked by {held[0]}')
+                db.execute('INSERT INTO locks (key, holder, sha, user, since) VALUES (?, ?, ?, ?, ?)',
+                           (inv.name, holder, data['sha'], claims['sub'], now))
+                db.execute('INSERT INTO runs VALUES (?, ?)', (rid, json.dumps(run)))
+                db.execute('COMMIT')
+            except BaseException:
+                db.execute('ROLLBACK')
+                raise
         token = None
         try:
-            # Persist pending lease before minting: restart/crash never leaves an immortal lock.
-            run = dict(run_id=rid, holder=holder, subject=claims['sub'], inventory=inv.name,
-                       limit=limit, mode=data['mode'], sha=data['sha'], started=now,
-                       certificate_serial=None, certificate_expires_at=now + svc.settings.run_lease_seconds,
-                       lease_expires_at=now + svc.settings.run_lease_seconds)
-            self.save(run)
             token = svc.bao.login()
             cert = svc.bao.sign_ssh_key(token, pub)
             serial, expires = certificate_details(cert)

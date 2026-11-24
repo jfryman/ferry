@@ -150,6 +150,10 @@ To change ferry and re-test: edit `src/ferry/...`, then `python -m pytest -q`, t
 - **Webhook ingress:** expose only `POST /webhook`, restricted to GitHub's hook IP ranges (GitHub publishes them at `api.github.com/meta`).
 - **One instance:** locks are one SQLite file, so run one ferry per config repo, as Atlantis does.
 
+The shared executor socket and checkout work directory use native runtime volumes
+(`ferry-lab-run`, `ferry-lab-work`). This avoids Docker Desktop bind-mount socket permissions
+and deleted/recreated checkout path inode caching. `down.sh` removes both volumes.
+
 ## Operator runs through the same service
 
 `up.sh` also builds `ferry-operator:lab` (the ferry image plus the OpenBao CLI) and provisions

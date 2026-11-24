@@ -61,7 +61,10 @@ def run(args):
 
     def request(path, data):
         # No shell, no token in argv, no credential subprocess output on errors.
-        p = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        try:
+            p = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            raise OperatorError('identity token command failed') from None
         if p.returncode or not p.stdout.strip():
             raise OperatorError('identity token command failed')
         token = p.stdout.strip()

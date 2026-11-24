@@ -207,6 +207,9 @@ def load(path: str | Path) -> Config:
         raise ValueError("ferry.yaml: at least one inventory is required")
     for inv in cfg.inventories:
         _check_inventory_apply(inv)
+    if not isinstance(cfg.apply.run_allowed, list) or not all(
+            isinstance(x, str) and x for x in cfg.apply.run_allowed):
+        raise ValueError("ferry.yaml: apply.run_allowed must be a list of subjects/groups")
     if not isinstance(cfg.base_branches, list) or not all(isinstance(b, str) and b for b in cfg.base_branches):
         raise ValueError("ferry.yaml: base_branches must be a list of branch names")
     return cfg
