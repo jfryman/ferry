@@ -77,12 +77,14 @@ path "identity/oidc/token/ferry" { capabilities = ["read"] }
 HCL
 TOKEN_ACCESSOR=$(bao auth list -format=json | run_py -c 'import json,sys; print(json.load(sys.stdin)["token/"]["accessor"])')
 for person in demo denied; do
+  role=ferry-operator
+  [ "$person" = denied ] && role=ferry-operator-denied
   entity=$(bao write -field=id identity/entity name="lab-$person")
   printf '%s\n' "$entity" > "$LAB/operators/$person.entity"
   bao write identity/entity-alias name="lab-$person" canonical_id="$entity" mount_accessor="$TOKEN_ACCESSOR" >/dev/null
-  bao write "auth/token/roles/lab-$person" allowed_policies=ferry-operator-identity \
+  bao write "auth/token/roles/$role" allowed_policies=ferry-operator-identity \
     allowed_entity_aliases="lab-$person" orphan=true renewable=false token_explicit_max_ttl=24h >/dev/null
-  bao token create -role="lab-$person" -entity-alias="lab-$person" -policy=ferry-operator-identity \
+  bao token create -role="$role" -entity-alias="lab-$person" -policy=ferry-operator-identity \
     -field=token > "$LAB/operators/$person.token"
 done
 chmod 600 "$LAB/operators/"*.token

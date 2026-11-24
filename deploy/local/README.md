@@ -162,7 +162,8 @@ OpenBao's **identity OIDC** endpoint, not another JWT auth mount:
 - RS256 key `ferry`, role `ferry`, client/audience `ferry`, five-minute identity tokens;
 - issuer `http://ferry-lab-bao:8200/v1/identity/oidc` (plain HTTP only in this isolated lab);
 - entities `lab-demo` (allowed) and `lab-denied` (valid identity, not allowed by ferry);
-- aliases on the `token/` mount, and separate token roles whose `allowed_entity_aliases` bind
+- aliases on the `token/` mount, and token roles `ferry-operator` / `ferry-operator-denied`
+  whose `allowed_entity_aliases` bind
   each demo login to its entity. The dev admin creates these logins; a real operator uses OIDC login.
 
 The two login tokens live under `$LAB_DIR/operators/`, mode 0600. They can **only** request an

@@ -321,3 +321,62 @@ def test_oversized_http_body_refused_before_identity_or_mint(api):
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_blocked_start_does_not_starve_existing_lease(api):
+    status, run = api.request()
+    assert status == 201
+    entered, release = threading.Event(), threading.Event()
+    original = api.main.return_value
+    def slow_config(*args):
+        entered.set()
+        assert release.wait(5)
+        return original
+    api.main.side_effect = slow_config
+    result = []
+    thread = threading.Thread(target=lambda: result.append(api.request()))
+    thread.start()
+    assert entered.wait(3)
+    try:
+        api.now += 1
+        assert api.request(f"/api/runs/{run['run_id']}/lease", data={}) == (
+            200, {'lease_expires_at': NOW+61})
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert result[0][0] == 409
+
+
+def test_inflight_signing_keeps_lock_but_cannot_resurrect_elapsed_lease(api):
+    entered, release = threading.Event(), threading.Event()
+    def slow_sign(*args):
+        entered.set()
+        assert release.wait(5)
+        return certificate(NOW+180)
+    api.bao.sign_ssh_key.side_effect = slow_sign
+    result = []
+    thread = threading.Thread(target=lambda: result.append(api.request()))
+    thread.start()
+    assert entered.wait(3)
+    try:
+        api.now += 61
+        api.svc.runs.expire()
+        assert api.locks.count() == 1  # no release while upstream signing is in progress
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert result == [(503, {'error': 'initial lease expired'})]
+    assert api.locks.count() == 0
+    with sqlite3.connect(api.locks.path) as db:
+        assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 0
+
+
+def test_switch_flipped_during_config_fetch_never_mints(api):
+    original = api.main.return_value
+    def flip_switch(*args):
+        api.svc.settings.allow_commands = ('plan',)
+        return original
+    api.main.side_effect = flip_switch
+    assert api.request() == (403, {'error': 'disabled'})
+    assert_not_minted(api)

@@ -53,6 +53,8 @@ class Runs:
         s = service.settings
         self.verifier = verifier or IdentityVerifier(s.run_oidc_issuer, s.run_oidc_audience, clock=service.clock)
         self.mutex = threading.RLock()
+        self.config_mutex = threading.Lock()
+        self.inflight = set()  # signing owns its lock until the bounded upstream calls return
         # API intentionally requires persistent service locks, not a second lock store.
         self.path = service.locks.path
         with closing(self.db()) as db:
@@ -69,7 +71,7 @@ class Runs:
         with self.mutex, closing(self.db()) as db:
             for (data,) in db.execute('SELECT data FROM runs').fetchall():
                 run = json.loads(data)
-                if run['lease_expires_at'] <= self.svc.clock():
+                if run['run_id'] not in self.inflight and run['lease_expires_at'] <= self.svc.clock():
                     self.complete(run, 'error')
 
     def complete(self, run, result):
@@ -102,10 +104,10 @@ class Runs:
                     raise ValueError()
             except ValueError:
                 raise RunError(400, 'bad json')
+            self.expire()
+            if path == '/api/runs':
+                return 201, self.start(claims, data)
             with self.mutex:
-                self.expire()
-                if path == '/api/runs':
-                    return 201, self.start(claims, data)
                 m = re.fullmatch(r'/api/runs/([a-f0-9]{32})/(lease|finish)', path)
                 if not m:
                     raise RunError(404, 'unknown run')
@@ -167,8 +169,10 @@ class Runs:
         ws = Workspace(svc.workspace.root / 'operator-config', svc.workspace.remote,
                        svc.workspace._token, git_user=svc.workspace.git_user,
                        git_timeout=svc.workspace.git_timeout)
-        main, _ = ws.main(svc.settings.default_branch)
-        cfg = config.load(main / 'ferry.yaml')
+        # Slow config fetches serialize only other starts, never existing lease renewals.
+        with self.config_mutex:
+            main, _ = ws.main(svc.settings.default_branch)
+            cfg = config.load(main / 'ferry.yaml')
         try:
             inv = cfg.inventory(data.get('inventory'))
         except KeyError:
@@ -177,6 +181,9 @@ class Runs:
         identities = {claims['sub'], *claims.get('groups', [])}
         if not identities.intersection(allowed):
             raise RunError(403, 'inventory not allowed')
+        if svc._disabled('apply' if data['mode'] == 'apply' else 'plan'):
+            raise RunError(403, 'disabled')
+        now = svc.clock()
         rid = uuid.uuid4().hex
         holder = f"run:{rid} ({claims['sub']})"
         run = dict(run_id=rid, holder=holder, subject=claims['sub'], inventory=inv.name,
@@ -185,7 +192,7 @@ class Runs:
                    lease_expires_at=now + svc.settings.run_lease_seconds)
         # Same table/transaction as PR locks. Persist the initial lease atomically with acquire:
         # a service crash between separate inserts must not leave an immortal operator holder.
-        with closing(self.db()) as db:
+        with self.mutex, closing(self.db()) as db:
             db.execute('BEGIN IMMEDIATE')
             try:
                 held = db.execute('SELECT holder FROM locks WHERE key = ?', (inv.name,)).fetchone()
@@ -195,6 +202,7 @@ class Runs:
                            (inv.name, holder, data['sha'], claims['sub'], now))
                 db.execute('INSERT INTO runs VALUES (?, ?)', (rid, json.dumps(run)))
                 db.execute('COMMIT')
+                self.inflight.add(rid)
             except BaseException:
                 db.execute('ROLLBACK')
                 raise
@@ -209,16 +217,24 @@ class Runs:
                        if svc.bao.s.vault_password_path else ''
             svc.bao.revoke(token)
             token = None
-            run.update(certificate_serial=serial, certificate_expires_at=expires,
-                       lease_expires_at=min(svc.clock() + svc.settings.run_lease_seconds, expires))
-            self.save(run)
+            with self.mutex:
+                # Expiry skips in-flight signing so no certificate is minted after releasing its
+                # lock. A slow start still fails, rather than resurrecting an elapsed initial lease.
+                if svc.clock() >= run['lease_expires_at'] or svc.clock() >= expires:
+                    raise RunError(503, 'initial lease expired')
+                run.update(certificate_serial=serial, certificate_expires_at=expires,
+                           lease_expires_at=min(svc.clock() + svc.settings.run_lease_seconds, expires))
+                self.save(run)
+                self.inflight.discard(rid)
             return dict(run_id=rid, certificate=cert, vault_password=password,
                         lease_expires_at=run['lease_expires_at'], inventory_path=inv.path,
                         ssh_user=svc.settings.ssh_user)
         except BaseException:
-            svc.locks.release(inv.name, holder)
-            with closing(self.db()) as db:
-                db.execute('DELETE FROM runs WHERE id = ?', (rid,))
+            with self.mutex:
+                svc.locks.release(inv.name, holder)
+                with closing(self.db()) as db:
+                    db.execute('DELETE FROM runs WHERE id = ?', (rid,))
+                self.inflight.discard(rid)
             raise
         finally:
             if token:

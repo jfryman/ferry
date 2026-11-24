@@ -10,6 +10,9 @@
 - Short-term login is the lab's admin-created entity + token alias + constrained token role.
   Operator token policy mints identity JWTs only. Google OIDC is future login work, not a service
   dependency. OpenBao identity-token endpoint is GET (`bao read`, not `write`).
+- Slow configuration/signing calls do not hold the active-lease mutex; renewals on other
+  inventories remain available. In-flight signing retains its lock until bounded upstream
+  calls return; a timed-out initial lease cannot be resurrected or return credentials.
 - SQLite `runs` stores nonsecret lease metadata. Reaper expires persisted runs after restart.
   PR IDs remain integers; operator holders are `run:<id> (<subject>)`, never looked up as PRs.
 - Signed certificate expiry is the hard lease cap; key ID is untouched, role-controlled.
