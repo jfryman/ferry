@@ -107,8 +107,9 @@ class World:
         delivery = delivery or f"delivery-{self._n}"
         return self.svc.handle(event, delivery, sign(body), body)
 
-    def pr_event(self, action="opened", author="pip", draft=False, fork=False):
+    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None):
         return {"action": action, "repository": {"full_name": "acme/ansible"},
+                "sender": {"login": sender or author},
                 "pull_request": {"number": 1, "draft": draft, "user": {"login": author},
                                  "head": {"sha": self.sha, "repo": {"full_name": "evil/ansible" if fork else "acme/ansible"}}}}
 
@@ -160,6 +161,14 @@ def test_plan_rule_waits_for_a_writer(world):
     assert world.deliver("issue_comment", world.comment_event("/ferry plan", user="james"))[1] == "plan queued"
     job = world.svc.jobs.get()
     assert (job.action, job.pr, job.sha, job.user) == ("plan", 1, world.sha, "james")
+
+
+def test_push_by_a_non_writer_waits(world):
+    # pip (a writer) authored the PR; mallory pushed into it: her code, so the plan rule is hers.
+    assert world.deliver("pull_request", world.pr_event("synchronize", sender="mallory"))[1] == \
+        "waiting for /ferry plan"
+    assert world.svc.jobs.empty() and "pushes from users" in world.comments[-1]["body"]
+    assert world.deliver("pull_request", world.pr_event("synchronize", sender="james"))[1] == "plan queued"
 
 
 @pytest.mark.parametrize("kw,why", [({"draft": True}, "draft"), ({"fork": True}, "fork")])

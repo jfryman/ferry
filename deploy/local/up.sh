@@ -125,7 +125,7 @@ docker run -d --name ferry-lab-target --network "$NET" -v "$LAB/ca:/lab/ca:ro" f
 # read-only. It refuses to start if it can read any of the paths in FERRY_EXECUTOR_MUST_NOT_READ.
 docker run -d --name ferry-lab-executor --network "$NET" -u 10002 \
   -v "$LAB/work:/var/lib/ferry/work:ro" -v "$LAB/run:/run/ferry" \
-  -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
+  -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock -e ANSIBLE_HOST_KEY_CHECKING=False \
   -e FERRY_EXECUTOR_MUST_NOT_READ=/secrets/app.pem:/secrets/webhook-secret:/jwt/nomad_openbao.jwt:/var/lib/ferry/state/locks.db \
   ferry:lab executor >/dev/null
 # Rootless Docker/Podman shows the host's files as another owner; let git read the lab's remote.
@@ -136,7 +136,7 @@ docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 -v "$LAB/git
   -e FERRY_GITHUB_REPO=acme/ansible -e FERRY_GITHUB_APP_ID=1 -e FERRY_GITHUB_APP_KEY_FILE=/secrets/app.pem \
   -e FERRY_WEBHOOK_SECRET_FILE=/secrets/webhook-secret \
   -e GITHUB_API_URL=http://ferry-lab-github:8080 -e FERRY_GITHUB_GIT_URL=file:///remote \
-  -e FERRY_SSH_USER=root \
+  -e FERRY_SSH_USER=root -e ANSIBLE_HOST_KEY_CHECKING=False \
   -e FERRY_OPENBAO_ADDR=http://ferry-lab-bao:8200 -e FERRY_OPENBAO_JWT_FILE=/jwt/nomad_openbao.jwt \
   -e FERRY_OPENBAO_VAULT_PASSWORD_PATH=secret/data/ansible/vault-password \
   ferry:lab >/dev/null

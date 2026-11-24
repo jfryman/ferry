@@ -1,7 +1,7 @@
 # Design decisions
 
 ## Engine first, CI as a thin driver
-James wants a workflow now and a service later (and reuse at work). All logic lives in
+A CI workflow first and a service later, from the same code. All logic lives in
 `Engine`; the CLI only maps CI variables to arguments. A service calls the same methods.
 
 ## Own callback plugin instead of parsing stdout
@@ -32,7 +32,7 @@ blocked. The config repo's guard role emits it. Blocked != failed in comments an
 plan with a blocked host is not clean (strict: re-plan when the printer is idle).
 
 ## Drift via node_exporter textfiles, not Pushgateway
-No Pushgateway in the ox cluster (checked 2026-11-14). The hosts already run node_exporter, so ferry
+No Pushgateway assumed. Managed hosts usually already run node_exporter, so ferry
 writes one textfile per host; staleness of that file is the "drift check didn't run" signal and
 needs no extra component. Cost: one write per host per drift run, skipped on blocked hosts.
 
@@ -148,3 +148,20 @@ refuse (GitHub's `unknown`). `ci_must_pass`/`ci_still_running` block in the serv
 (`pipeline_blocks=True`, like GitHub required checks) but not in the CI driver, whose apply job runs
 inside that pipeline. Token: project access token, Developer, api + read_repository.
 
+
+## The plan rule covers pushers, not only authors
+A push into a writer's PR by someone without write access (a bot or App with contents write, a user
+who lost access) would otherwise be planned automatically, and a plan runs the pushed code with root
+SSH access. `synchronize` (GitHub, `sender`) and MR updates with new commits (GitLab, `user`) now
+check the pusher too; a non-writer's push waits for `/ferry plan` like a non-writer's PR.
+
+## GitLab intake gets the same pre-queue checks as GitHub
+Both `/ferry plan` and `/ferry apply` check Developer+ in the webhook handler, before a job exists,
+and every GitLab job goes through the bounded `_enqueue` (a full queue answers 503 instead of
+blocking the HTTP thread).
+
+## Host key checking on by default
+The image sets `ANSIBLE_HOST_KEY_CHECKING=True`: without it, anything answering on a host's address
+receives an apply's payload, including values decrypted with the vault password. Deployments mount
+known_hosts at `/etc/ssh/ssh_known_hosts` (pinned keys or `@cert-authority`). The local lab turns it
+off for its throwaway target.

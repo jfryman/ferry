@@ -98,8 +98,7 @@ class GitLabService(Service):
         action, iid = mr.get("action"), int(mr["iid"])
         sha = (mr.get("last_commit") or {}).get("id", "")
         if action in MR_CLOSE_ACTIONS:
-            self.jobs.put(Job("unlock", iid, sha, delivery=delivery))
-            return 202, "unlock queued"
+            return self._enqueue(Job("unlock", iid, sha, delivery=delivery))
         new_commits = action == "update" and bool(mr.get("oldrev"))
         if not (action in MR_PLAN_ACTIONS or new_commits or
                 (action == "update" and _became_ready(p.get("changes") or {}))):
@@ -113,8 +112,11 @@ class GitLabService(Service):
         if not self.vcs.can_apply(cr.author):
             self._say_waiting(iid, sha, cr.author)
             return 202, "waiting for /ferry plan"
-        self.jobs.put(Job("plan", iid, sha, cr.author, delivery=delivery))
-        return 202, "plan queued"
+        pusher = (p.get("user") or {}).get("username") or cr.author
+        if new_commits and pusher != cr.author and not self.vcs.can_apply(pusher):
+            self._say_waiting(iid, sha, pusher, who="pushes from users")
+            return 202, "waiting for /ferry plan"
+        return self._enqueue(Job("plan", iid, sha, cr.author, delivery=delivery))
 
     def _on_note(self, p: dict, delivery: str) -> tuple[int, str]:
         note = p.get("object_attributes") or {}
@@ -130,9 +132,10 @@ class GitLabService(Service):
             return 202, "not a ferry command"
         action, inventory = m.group(1), m.group(2)
         iid = int(p["merge_request"]["iid"])
+        # Both commands need Developer access, checked here: a refused request never costs a checkout
+        # or a credential (the engine checks again, along with every other apply gate).
+        if not self.vcs.can_apply(user):
+            self.vcs.post_note(iid, f"`/ferry {action}` needs Developer access to this project; @{user} doesn't have it.")
+            return 202, f"{action} refused: no Developer access"
         cr = self.vcs.get_change_request(iid)
-        if action == "plan" and not self.vcs.can_apply(user):
-            self.vcs.post_note(iid, f"`/ferry plan` needs Developer access to this project; @{user} doesn't have it.")
-            return 202, "plan refused: no Developer access"
-        self.jobs.put(Job(action, iid, cr.head_sha, user, inventory, delivery))
-        return 202, f"{action} queued"
+        return self._enqueue(Job(action, iid, cr.head_sha, user, inventory, delivery))

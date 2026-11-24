@@ -152,6 +152,12 @@ class Service:
         if not self.vcs.can_apply(author):
             self._say_waiting(number, sha, author)
             return 202, "waiting for /ferry plan"
+        # A push into a writer's PR by someone else (a bot or App with contents write, a user who lost
+        # access) is that pusher's code: the plan rule applies to them too.
+        pusher = (p.get("sender") or {}).get("login") or author
+        if action == "synchronize" and pusher != author and not self.vcs.can_apply(pusher):
+            self._say_waiting(number, sha, pusher, who="pushes from users")
+            return 202, "waiting for /ferry plan"
         return self._enqueue(Job("plan", number, sha, author, delivery=delivery))
 
     def _on_comment(self, p: dict, delivery: str) -> tuple[int, str]:
@@ -181,12 +187,12 @@ class Service:
             return 503, "queue full, try again later"
         return 202, f"{job.action} queued"
 
-    def _say_waiting(self, number: int, sha: str, author: str) -> None:
+    def _say_waiting(self, number: int, sha: str, author: str, who: str = "authors") -> None:
         marker = f"{WAITING_MARKER} {sha} -->"
         if any(marker in n.body for n in self.vcs.list_notes(number) if n.author == self.vcs.bot_username()):
             return
         self.vcs.post_note(number, (
-            f"ferry doesn't plan automatically for authors without {self.access} (@{author}): a plan runs "
+            f"ferry doesn't plan automatically for {who} without {self.access} (@{author}): a plan runs "
             f"this {self.noun}'s playbooks against the hosts. Someone with {self.access} can comment "
             f"`/ferry plan`.\n\n{marker}"))
 

@@ -40,10 +40,10 @@ flowchart LR
 | `ferry-lab-ferry` (this repo's `Dockerfile`) | The ferry Nomad job (`deploy/nomad/ferry.nomad.hcl` is the starting point; the real one lives in your infrastructure-as-code repo) |
 | `fakegh.py` on :18999 | api.github.com plus the GitHub App. It answers `/app`, the installation token, PR, files, reviews, comments, collaborator permission, the branch's rulesets and the GraphQL review decision for PR #1. Writers: `james`, `pip`. |
 | `/tmp/ferry-lab/remote/acme/ansible.git` with `refs/pull/1/head` | your config repo on GitHub (ferry fetches with `FERRY_GITHUB_GIT_URL=file:///remote`) |
-| `ferry-lab-bao`, dev mode, root token `lab` | OpenBao on ops/ceph-1/ceph-2 |
+| `ferry-lab-bao`, dev mode, root token `lab` | your OpenBao cluster |
 | `ssh-client-signer/` mount, role `ferry`, policy `ssh-sign-ferry` (set by `up.sh` with the CLI) | your OpenBao config (terraform or CLI): the same values |
 | `auth/jwt-nomad`, role `ferry`, static public key; `mkjwt.py` mints the token | Nomad workload identity: the job's `identity { aud = ["openbao.io"] file = true }`, validated against Nomad's JWKS, bound on `nomad_job_id = ferry` |
-| `secret/ansible/vault-password` (dev kv-v2) | `infra/ansible/vault-password` (`infra/` kv-v2) |
+| `secret/ansible/vault-password` (dev kv-v2) | the vault password at the path you set in `FERRY_OPENBAO_VAULT_PASSWORD_PATH` (any kv-v2 mount) |
 | `ferry-lab-target` (`target/Dockerfile`) | Every managed host once its sshd trusts the SSH user CA: `TrustedUserCAKeys`, and root accepts only principal `ferry`. No authorized_keys at all here, so any login is a certificate login. |
 | `/tmp/ferry-lab/state/locks.db` | The ferry job's host volume (`FERRY_LOCK_DB`) |
 | The config repo `up.sh` writes (one host, a `motd` role, one vaulted var) | your config repo with its `ferry.yaml` |
@@ -116,7 +116,7 @@ To change ferry and re-test: edit `src/ferry/...`, then `python -m pytest -q`, t
 
 ## Known gaps before production
 
-- **Secret lookups that authenticate some other way** (e.g. a client certificate configured in `/etc/ansible/ansible.cfg` on an existing executor host). In ferry's job it must use the per-job token (`VAULT_TOKEN` / `ANSIBLE_HASHI_VAULT_TOKEN`, which ferry sets). The lab's config repo has no `infra/` lookups, so it doesn't exercise this.
-- **Host keys:** the image sets `ANSIBLE_HOST_KEY_CHECKING=False`. Production should pin host keys, either with OpenBao host certificates (`@cert-authority` in known_hosts; phase 3 of the SSH plan) or a managed known_hosts file.
+- **Secret lookups that authenticate some other way** (e.g. a client certificate configured in `/etc/ansible/ansible.cfg` on an existing executor host). In ferry's job it must use the per-job token (`VAULT_TOKEN` / `ANSIBLE_HASHI_VAULT_TOKEN`, which ferry sets). The lab's config repo has no secret lookups, so it doesn't exercise this.
+- **Host keys:** the image checks host keys (`ANSIBLE_HOST_KEY_CHECKING=True`). Mount a known_hosts file at `/etc/ssh/ssh_known_hosts` in the executor (or the service, without an executor): pinned keys, or `@cert-authority` lines if your hosts have OpenBao-signed host certificates. The lab turns checking off for its throwaway target (`up.sh`).
 - **Webhook ingress:** expose only `POST /webhook`, restricted to GitHub's hook IP ranges (GitHub publishes them at `api.github.com/meta`).
 - **One instance:** locks are one SQLite file, so run one ferry per config repo, as Atlantis does.
