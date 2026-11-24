@@ -4,11 +4,13 @@ Atlantis-style plan/apply/drift for Ansible. The engine is independent of any on
 from GitLab CI (`ferry plan|apply|drift|unlock`), or as a long-lived webhook service
 (`ferry serve`) for a GitHub App or a GitLab project.
 
-## State (0.3.0 + unreleased operator runs)
+## State (0.4.0)
 
 - `ferry run`: operator Ansible is local; the service verifies OpenBao RS256 identity JWTs,
   authorizes global + default-branch inventory allowlists, owns renewable SQLite leases and
   signing, records the certificate serial. See [operator-runs.md](operator-runs.md).
+  Break-glass: no PR approval; an apply must be the default-branch head; short CLI cert TTL;
+  every run event audited (jobs + `ferry.runs` log line), optional `--reason`.
 - Engine, policy, scope (`--limit` from changed files), per-host results, drift textfile metrics.
 - Drivers: GitLab CI (CLI, tag locks) and `ferry serve` (GitHub App or GitLab; SQLite locks in the
   service's state file; per-job OpenBao credentials: workload-identity login, throwaway SSH

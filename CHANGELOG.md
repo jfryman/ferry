@@ -2,33 +2,66 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
-## Unreleased
+## [0.4.0] - 2026-11-24
 
-### Security
-- Pending operator leases cannot be finished/renewed before signing completes; validate lock
-  ownership before credentials return. Drift now participates in inventory locking.
-- Audit issuance immediately with a client-asserted relative playbook path; redact CLI terminal
-  streams and reject non-standard JSON NumericDates.
-- Operator hardening: apply disable gates both client-chosen modes; safe configurable display
-  identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
-- CLI certificates ask OpenBao for a short TTL (`FERRY_RUN_CERT_TTL`, default 15m) and are
-  refused if they come back longer (#53).
-- `--insecure-http` no longer turns off SSH host-key checking; that is `--no-host-key-checking` (#54).
-- Operator identity keys (JWKS) are cached for 5 min; an unknown `kid` refetches at most every
-  30 s, so bad tokens no longer cause an outbound fetch each (#55).
-- A PR blocked by a CLI run's lock sees only `run:<id>`, never the operator's name or subject (#57).
-- `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
-  entries and empty group claims never match.
+`ferry run`: operators run Ansible from their own machine, **through the running service**. The
+service owns the inventory lock, mints the per-run credentials and records the audit, as it does for
+webhook jobs (#50, #52). It's a break-glass path: no PR, review or approval. The API is off unless
+`FERRY_RUN_OIDC_ISSUER` and `FERRY_RUN_OIDC_AUDIENCE` are both set.
 
 ### Added
-- `ferry run --reason`, and an audit log line (`ferry.runs`) for every CLI run event: issued,
-  ok/failed/expired and refused, with subject, inventory, SHA, mode and time. Refused starts for
-  a verified identity get a `refused` job record. README documents `ferry run` as break-glass.
-- `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,
-  short renewable leases, OpenBao identity JWT verification and per-run SSH/vault credentials.
-- Default-branch per-inventory operator authorization, kill switches, certificate-serial audit
-  and fixed-label metrics by trigger. The API is disabled unless issuer and audience are set.
-- Admin-token identity demo and local operator check/apply, contention, expiry and denial scenarios.
+- **`ferry run [-i inventory] [--limit …] [--apply] [--reason …] playbook`** (#52): check/diff by
+  default, `--apply` to write. The CLI gets an OpenBao identity token from `--token-command` and
+  sends it as a bearer token to `POST /api/runs`, then `/api/runs/<id>/lease` and `/finish`. It
+  generates a throwaway ed25519 key, keeps credentials in a private temporary directory, renews
+  its lease while Ansible runs, and stops Ansible if the lease can't be renewed.
+- **Authorization:** RS256 identity tokens verified against the issuer's JWKS, with a fixed issuer
+  and audience. The caller must be on `FERRY_RUN_ALLOWED_SUBJECTS`/`_GROUPS` **and** the inventory's
+  `apply.run_allowed` in the default branch's `ferry.yaml`.
+- **Locks are shared:** CLI runs, PR jobs and scheduled drift all use the same inventory lock. A CLI run
+  blocks a PR plan or apply and the reverse. Leases expire if a client dies, and survive restarts.
+- **Audit** (#64): job records (`/jobs`) and a `ferry.runs` log line for every CLI run event:
+  issued, ok, failed, expired and refused. Each has the identity subject and display name,
+  inventory, SHA, mode, limit, playbook, reason, time, and the certificate serial. Starts
+  refused for a verified identity are recorded too. `--reason` is optional (at most 256 characters).
+- Lab scenarios for operator check/apply, unmerged apply, denied identity, contention and lease expiry.
+
+### Security
+- **An apply must be the default-branch head** (#58): the service refuses (409) a `--apply`
+  whose SHA isn't the head it fetched, so operators apply only merged code. Check mode may name any
+  published SHA. Empty allow-list entries and empty group claims never match.
+- **Short CLI certificates** (#53, #59): the service asks OpenBao for `FERRY_RUN_CERT_TTL`
+  (default `15m`) and refuses a certificate that comes back longer. Certificates are still not scoped
+  to the locked inventory (#53 stays open for later).
+- **`--insecure-http` no longer disables SSH host-key checking** (#54, #60); that's the separate
+  `--no-host-key-checking`, lab only.
+- **JWKS cache** (#55, #63): keys are cached for 5 minutes; an unknown `kid` refetches at most every
+  30 s; bad tokens never trigger a fetch. If the issuer is unreachable, keys up to an hour old are
+  still used, then requests fail closed.
+- **No operator identity in code-host comments** (#57, #64): a PR blocked by a CLI run sees
+  `run:<id>` only.
+- The apply switch stops new CLI runs in both modes, and is re-checked right before signing and
+  before credentials are returned. No identity token, OpenBao token, key, vault password or output is
+  stored. All supplied credentials are masked in CLI output regardless of length; output over 1 MiB
+  is withheld rather than truncated.
+
+### Changed
+- **Scheduled drift takes the inventory lock** before minting credentials, and skips (and records)
+  inventories that are held. After a restart, stale drift locks are released only once the executor
+  confirms it's idle.
+- Job records have new columns (`trigger`, `run_id`, `subject`, `display_name`, `mode`, `limit`,
+  `playbook`, `certificate_serial`, `counts`, `reason`). Existing state databases are migrated in
+  place on start.
+- Metrics: new `ferry_jobs_by_trigger_total{action,result,trigger}` (`webhook`, `schedule`, `cli`);
+  existing series are unchanged.
+- Local lab: the executor socket is on a named volume (Docker Desktop on macOS can't chmod a socket on
+  a bind mount).
+
+### Upgrading
+- Nothing to do if you don't use `ferry run`: the API stays off. To enable it, see the README's
+  "Operator runs" section: an OpenBao identity token role, the two `FERRY_RUN_OIDC_*` settings, an
+  allow-list, `apply.run_allowed` per inventory, and an ingress route for `POST /api/runs` and its
+  lease/finish routes only. Never route `/jobs` or `/metrics` publicly.
 
 ## [0.3.0] - 2026-11-24
 
@@ -151,6 +184,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[0.4.0]: https://github.com/jfryman/ferry/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jfryman/ferry/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jfryman/ferry/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jfryman/ferry/compare/v0.1.1...v0.2.0
