@@ -2,6 +2,7 @@
 import base64
 import json
 import math
+import threading
 import time
 import urllib.request
 
@@ -19,9 +20,45 @@ class IdentityError(ValueError):
 
 
 class IdentityVerifier:
-    def __init__(self, issuer, audience, fetch=None, clock=time.time):
+    """Keys are cached (#55): refetched after cache_seconds, or early (at most once per
+    refetch_seconds) when a token names an unknown kid. If the issuer is unreachable, keys up to
+    stale_seconds old are still used; with nothing usable cached, verification fails closed."""
+
+    def __init__(self, issuer, audience, fetch=None, clock=time.time,
+                 cache_seconds=300, refetch_seconds=30, stale_seconds=3600):
         self.issuer, self.audience, self.clock = issuer, audience, clock
         self.fetch = fetch or self._fetch
+        self.cache_seconds, self.refetch_seconds, self.stale_seconds = cache_seconds, refetch_seconds, stale_seconds
+        self._lock = threading.Lock()
+        self._keys = None       # the last good JWKS 'keys' list
+        self._fetched_at = None  # when _keys was fetched
+        self._tried_at = None    # last fetch attempt, good or not
+
+    def _refresh(self, now):
+        self._tried_at = now
+        try:
+            keys = self.fetch()['keys']
+            if not isinstance(keys, list):
+                raise ValueError()
+        except Exception:
+            return False
+        self._keys, self._fetched_at = keys, now
+        return True
+
+    def keys_for(self, kid):
+        now = self.clock()
+        with self._lock:
+            age = None if self._fetched_at is None else now - self._fetched_at
+            if age is None or age >= self.cache_seconds:
+                if self._tried_at is None or now - self._tried_at >= self.refetch_seconds or age is None:
+                    self._refresh(now)
+            elif not any(isinstance(k, dict) and k.get('kid') == kid for k in self._keys):
+                # A new kid may mean the issuer rotated keys: refetch, but rate-limited.
+                if self._tried_at is None or now - self._tried_at >= self.refetch_seconds:
+                    self._refresh(now)
+            if self._fetched_at is None or now - self._fetched_at >= self.stale_seconds:
+                raise ValueError('no usable keys')
+            return [k for k in self._keys if isinstance(k, dict) and k.get('kid') == kid]
 
     def _fetch(self):
         with urllib.request.urlopen(self.issuer.rstrip('/') + '/.well-known/keys', timeout=10) as r:
@@ -37,8 +74,8 @@ class IdentityVerifier:
             # No algorithm negotiation, symmetric keys, remote jku/x5u, or unsigned JWTs.
             if header.get('alg') != 'RS256' or not isinstance(header.get('kid'), str):
                 raise ValueError()
-            keys = [k for k in self.fetch()['keys'] if k.get('kid') == header['kid']
-                    and k.get('kty') == 'RSA' and k.get('alg', 'RS256') == 'RS256'
+            keys = [k for k in self.keys_for(header['kid'])
+                    if k.get('kty') == 'RSA' and k.get('alg', 'RS256') == 'RS256'
                     and k.get('use', 'sig') == 'sig']
             if len(keys) != 1:
                 raise ValueError()
