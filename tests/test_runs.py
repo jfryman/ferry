@@ -126,7 +126,8 @@ def assert_not_minted(api):
     assert api.locks.count() == 0
     with sqlite3.connect(api.locks.path) as db:
         assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 0
-    assert api.svc.state.jobs() == []
+    # A refusal for a verified identity is audited, but nothing is issued.
+    assert all(j['result'] == 'refused' for j in api.svc.state.jobs())
 
 
 @pytest.mark.parametrize('attack', ['signature', 'issuer', 'audience', 'expired', 'none', 'HS256'])
@@ -223,7 +224,9 @@ def test_run_lock_blocks_pr_without_vcs_lookup(api):
     vcs = Mock()
     engine = Engine(config.Config(), api.tmp, Mock(), vcs=vcs, locks=api.locks)
     reason = engine._lock_conflict('homelab', 1, api.sha, 'example-user')
-    assert holder in reason
+    # #57: the comment names the run, never the operator's name or identity subject.
+    assert f"run:{run['run_id']}" in reason and 'operator run' in reason
+    assert SUBJECT not in reason and 'sub=' not in reason
     assert vcs.mock_calls == []
     assert api.locks.get('homelab').holder == holder
 
@@ -467,7 +470,7 @@ def test_lost_pending_state_fails_closed(api, lost):
     api.bao.sign_ssh_key.side_effect = sign
     assert api.request() == (409, {'error': 'run or lock lost during start'})
     assert api.locks.count() == 0
-    assert api.svc.state.jobs() == []
+    assert all(j['result'] == 'refused' for j in api.svc.state.jobs())
 
 
 @pytest.mark.parametrize('playbook', ['/etc/passwd', '../site.yml', 'a/../site.yml', 'a\\site.yml', '', 'x'*513, 'site\n.yml'])
@@ -500,7 +503,7 @@ def test_switch_flip_at_credential_boundary_fails_closed(api, during):
     assert api.locks.count() == 0
     if during == 'login':
         api.bao.sign_ssh_key.assert_not_called()
-    assert api.svc.state.jobs() == []
+    assert all(j['result'] == 'refused' for j in api.svc.state.jobs())
     with sqlite3.connect(api.locks.path) as db:
         assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 0
 
@@ -549,3 +552,51 @@ def test_duration_seconds(value, seconds):
 def test_duration_seconds_rejects(value):
     with pytest.raises(ValueError):
         duration_seconds(value)
+def audit_lines(caplog, event):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(f'cli run {event}:')]
+
+
+def test_every_run_is_audited_in_jobs_and_log(api, caplog):
+    caplog.set_level('INFO', logger='ferry.runs')
+    status, run = api.request(data={**api.payload, 'reason': 'restore\nservice\x1b[2J after outage'})
+    assert status == 201
+    issued = api.svc.state.jobs()[0]
+    assert issued['result'] == 'issued' and issued['subject'] == SUBJECT and issued['inventory'] == 'homelab'
+    assert issued['sha'] == api.sha and issued['started'] and issued['trigger'] == 'cli'
+    assert issued['reason'] == 'restore service[2J after outage'
+    [line] = audit_lines(caplog, 'issued')
+    for want in (run['run_id'], f'subject="{SUBJECT}"', 'inventory="homelab"', f'sha="{api.sha}"',
+                 'mode="apply"', 'serial="42"', 'reason="restore service[2J after outage"'):
+        assert want in line
+    assert '\n' not in line and '\x1b' not in line and 'test-only' not in line
+    assert api.request(f"/api/runs/{run['run_id']}/finish", data={'ok': True, 'counts': {'hosts': 1}})[0] == 200
+    done = api.svc.state.jobs()[0]
+    assert done['result'] == 'ok' and done['subject'] == SUBJECT and done['reason'] == issued['reason']
+    [line] = audit_lines(caplog, 'ok')
+    assert f'sha="{api.sha}"' in line and 'inventory="homelab"' in line
+
+
+def test_reason_is_optional_and_bounded(api):
+    assert api.request(data={**api.payload, 'reason': 'x' * 1025})[0] == 400
+    assert api.request(data={**api.payload, 'reason': 7})[0] == 400
+    assert api.request()[0] == 201
+    assert api.svc.state.jobs()[0]['reason'] is None
+
+
+def test_refused_identity_is_audited(api, caplog):
+    caplog.set_level('INFO', logger='ferry.runs')
+    token = api.token({'sub': 'stranger-example', 'groups': ['operators-example']})
+    assert api.request(token=token, data={**api.payload, 'inventory': 'restricted'})[0] == 403
+    [job] = api.svc.state.jobs()
+    assert job['result'] == 'refused' and job['subject'] == 'stranger-example'
+    assert job['inventory'] == 'restricted' and job['sha'] == api.sha
+    [line] = audit_lines(caplog, 'refused')
+    assert 'subject="stranger-example"' in line and 'inventory not allowed' in line
+    assert api.bao.mock_calls == []
+
+
+def test_unverified_identity_leaves_no_job(api, caplog):
+    caplog.set_level('INFO', logger='ferry.runs')
+    assert api.request(token='not.a.token')[0] == 401
+    assert api.svc.state.jobs() == []
+    assert any('invalid identity token' in r.getMessage() for r in caplog.records)

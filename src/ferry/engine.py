@@ -127,7 +127,11 @@ class Engine:
         # expired token) keeps the holder's lock: the lock is what stops two changes interleaving.
         stale = False
         if isinstance(held.holder, str):
-            return f"inventory `{inventory}` is locked by {held.holder}"
+            # Operator runs' holders carry a name and identity subject: keep them out of code-host
+            # comments (#57). The full holder stays in the lock table and /jobs.
+            who = held.holder.split(' ', 1)[0]
+            what = "an operator run" if who.startswith("run:") else "a scheduled job"
+            return f"inventory `{inventory}` is locked by {what} (`{who}`)"
         if held.holder and self.vcs is not None:
             try:
                 stale = not self.vcs.get_change_request(held.holder).open

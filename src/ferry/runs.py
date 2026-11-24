@@ -49,6 +49,24 @@ def duration_seconds(value):
     if not m or int(m[1]) <= 0:
         raise ValueError(f'invalid duration {value!r}')
     return int(m[1]) * {'': 1, 's': 1, 'm': 60, 'h': 3600}[m[2]]
+log = logging.getLogger("ferry.runs")
+
+
+def clean_text(value, limit, spaces=False):
+    """Strip control/format characters and collapse whitespace: safe in a log line or comment.
+    With spaces, whitespace controls (newline, tab) become spaces first (free text: reasons)."""
+    if spaces:
+        value = ''.join(' ' if c.isspace() else c for c in value)
+    value = ''.join(c for c in value if not unicodedata.category(c).startswith('C'))
+    return ' '.join(value.split())[:limit]
+
+
+def audit_line(event, run, **extra):
+    """One greppable audit log line per CLI run event: who, what inventory, what SHA, when."""
+    fields = dict(run=run.get('run_id'), subject=run.get('subject'), name=run.get('display_name'),
+                  inventory=run.get('inventory'), sha=run.get('sha'), mode=run.get('mode'),
+                  limit=run.get('limit'), playbook=run.get('playbook'), reason=run.get('reason'), **extra)
+    log.info("cli run %s: %s", event, ' '.join(f'{k}={json.dumps(v)}' for k, v in fields.items() if v is not None))
 
 
 class RunError(ValueError):
@@ -89,6 +107,8 @@ class Runs:
         self.svc.state.record_job({**run, 'action': 'apply' if run['mode'] == 'apply' else 'plan',
             'trigger': 'cli', 'user': run['subject'], 'result': result,
             'seconds': max(0, now-run['started'])})
+        audit_line(result if result != 'error' else 'expired', run, seconds=round(max(0, now-run['started']), 1),
+                   counts=run.get('counts'))
         self.svc.metrics.job_done('apply' if run['mode'] == 'apply' else 'plan', result,
                                  max(0, now-run['started']), now, trigger='cli')
         self.svc.locks.release(run['inventory'], run['holder'])
@@ -96,6 +116,7 @@ class Runs:
             db.execute('DELETE FROM runs WHERE id = ?', (run['run_id'],))
 
     def request(self, path, headers, body):
+        claims = None
         try:
             if len(body) > self.svc.settings.max_body_bytes:
                 raise RunError(413, 'body too large')
@@ -151,13 +172,41 @@ class Runs:
                 self.complete(run, 'ok' if data['ok'] else 'failed')
                 return 200, {'ok': True}
         except IdentityError:
+            log.warning("cli run refused: invalid identity token (%s)", path if path == '/api/runs' else 'lease/finish')
             return 401, {'error': 'invalid identity token'}
         except RunError as e:
+            if claims is not None:
+                self.refused(path, claims, body, e)
+            else:
+                log.warning("cli run refused: %s (%s)", e.text, e.status)
             return e.status, {'error': e.text}
         except Exception as e:
-            logging.getLogger("ferry.runs").warning("run unavailable (%s)", type(e).__name__)
+            log.warning("run unavailable (%s)", type(e).__name__)
             # Never echo upstream errors or bodies containing credentials.
             return 503, {'error': 'run unavailable'}
+
+    def refused(self, path, claims, body, err):
+        """A refusal for a verified identity: an audit log line, and a job record for starts."""
+        try:
+            data = json.loads(body)
+            data = data if isinstance(data, dict) else {}
+        except ValueError:
+            data = {}
+        sha = data.get('sha') if re.fullmatch('[a-f0-9]{40}', str(data.get('sha', ''))) else None
+        inv = data.get('inventory') if isinstance(data.get('inventory'), str) else None
+        inv = clean_text(inv, 128) or None if inv else None
+        mode = data.get('mode') if data.get('mode') in ('check', 'apply') else None
+        name = claims.get(self.svc.settings.run_name_claim)
+        run = dict(subject=claims['sub'], display_name=clean_text(name, 128) if isinstance(name, str) else None,
+                   inventory=inv, sha=sha, mode=mode)
+        audit_line('refused', run, status=err.status, error=err.text)
+        if path != '/api/runs':
+            return
+        try:
+            self.svc.state.record_job({**run, 'action': 'apply' if mode == 'apply' else 'plan', 'trigger': 'cli',
+                'user': claims['sub'], 'result': 'refused', 'started': self.svc.clock(), 'seconds': 0})
+        except Exception:
+            log.exception("couldn't record a refused cli run")
 
     def start(self, claims, data):
         svc, now = self.svc, self.svc.clock()
@@ -166,6 +215,10 @@ class Runs:
         playbook = data.get('playbook')
         if not isinstance(playbook, str) or not 0 < len(playbook) <= 512 or playbook.startswith('/') or '\\' in playbook or any(p in ('', '.', '..') for p in playbook.split('/')) or any(ord(c) < 32 or ord(c) == 127 for c in playbook):
             raise RunError(400, 'invalid repo-relative playbook')
+        reason = data.get('reason')
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 1024):
+            raise RunError(400, 'invalid reason')
+        reason = clean_text(reason, 256, spaces=True) or None if reason else None
         limit = data.get('limit')
         if limit is not None and (not isinstance(limit, str) or len(limit) > 1024 or any(ord(c)<32 for c in limit)):
             raise RunError(400, 'invalid limit')
@@ -211,11 +264,10 @@ class Runs:
         name = claims.get(svc.settings.run_name_claim)
         if not isinstance(name, str):
             name = claims['sub']
-        name = ''.join(c for c in name if not unicodedata.category(c).startswith('C'))
-        name = ' '.join(name.split())[:128] or claims['sub']
+        name = clean_text(name, 128) or claims['sub']
         holder = f"run:{rid} ({name}; sub={claims['sub']})"
         run = dict(run_id=rid, holder=holder, subject=claims['sub'], display_name=name, inventory=inv.name,
-                   limit=limit, mode=data['mode'], sha=data['sha'], playbook=playbook, state='pending', started=now,
+                   limit=limit, mode=data['mode'], sha=data['sha'], playbook=playbook, reason=reason, state='pending', started=now,
                    certificate_serial=None, certificate_expires_at=now + svc.settings.run_lease_seconds,
                    lease_expires_at=now + svc.settings.run_lease_seconds)
         # Same table/transaction as PR locks. Persist the initial lease atomically with acquire:
@@ -270,6 +322,7 @@ class Runs:
                 # Fail closed if the issuance audit cannot be persisted. No credentials in this row.
                 svc.state.record_job({**run, 'action': 'apply' if run['mode'] == 'apply' else 'plan',
                     'trigger': 'cli', 'user': run['subject'], 'result': 'issued', 'seconds': 0})
+                audit_line('issued', run, serial=serial, certificate_expires_at=int(expires))
                 self.inflight.discard(rid)
             return dict(run_id=rid, certificate=cert, vault_password=password,
                         lease_expires_at=run['lease_expires_at'], inventory_path=inv.path,

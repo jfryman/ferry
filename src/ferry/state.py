@@ -24,7 +24,7 @@ HEAD_MAX_ROWS = 20_000
 JOB_HISTORY = 200
 # What the job history keeps: no error text or refusal reasons (they can name internal hosts and
 # paths, and the history is served unauthenticated); those are on the PR and in the service log.
-JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds", "trigger", "run_id", "subject", "limit", "mode", "certificate_serial", "counts", "display_name", "playbook")
+JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds", "trigger", "run_id", "subject", "limit", "mode", "certificate_serial", "counts", "display_name", "playbook", "reason")
 
 
 class MemoryState:

@@ -591,7 +591,7 @@ def test_metrics_and_job_history(world, http):
     assert jobs[0] == {"id": 2, "action": "apply", "pr": 1, "sha": world.sha[:12], "user": "james",
                        "inventory": None, "result": "refused", "started": NOW, "seconds": 0.0,
                        "trigger": "webhook", "run_id": None, "subject": None, "limit": None,
-                       "mode": None, "certificate_serial": None, "counts": None, "display_name": None, "playbook": None}
+                       "mode": None, "certificate_serial": None, "counts": None, "display_name": None, "playbook": None, "reason": None}
     world.svc.jobs.put(Job("unlock", 1, world.sha, "pip"))
     world.closed = True
     world.drain()
