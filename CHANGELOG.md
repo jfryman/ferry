@@ -2,6 +2,49 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## [0.3.0] - 2026-11-24
+
+Security fixes and Atlantis-parity features for `ferry serve`, from the 0.2.1 review (#21–#30,
+#37). Both backends (GitHub and GitLab) get every change.
+
+### Security
+- **Locks fail closed** (#21, #38): an API error while checking a lock holder (timeout, 5xx, rate
+  limit) refuses and keeps the lock instead of giving it away; only a definite 404/410 makes a lock
+  stale. Commands on closed or merged PRs are refused at the webhook, and a queued plan for a PR
+  that closed runs nothing.
+- **Only PRs into the default branch** (#22, #39), or a branch listed in the default branch's
+  `ferry.yaml` `base_branches`. A PR can't allow its own base; a PR retargeted after its plan is
+  not applied.
+- **Apply refuses a PR behind its base** (#23, #40): applying it would revert what merged since.
+  The plan warns, and the apply says to rebase or merge the base first.
+- **Comment commands dedupe on the comment/note id** (#37, #41): a comment re-sent with a fresh
+  delivery id and re-encoded bytes runs at most once.
+- **Comments** (#24, #42): the plan marker must be the last line of ferry's own comment and carries
+  an HMAC; PR-controlled text is escaped; the error path and the vault password are redacted; the
+  size is bounded.
+- **Pushers' approvals don't count** (#25, #43): an approval from anyone who pushed or authored
+  commits in the PR doesn't meet the approval rule.
+- **`ansible-galaxy` runs in the executor** (#26, #44), with a timeout
+  (`FERRY_GALAXY_TIMEOUT_SECONDS`) and none of the service's environment. `FERRY_GALAXY=skip`
+  never reads `requirements.yml`.
+
+### Added
+- **Commit statuses** (#29, #47): with `FERRY_COMMIT_STATUS=1`, `ferry/plan: <inventory>` and
+  `ferry/apply: <inventory>` on the head that ran, so branch protection can require an apply before
+  merge. Ferry's own required status never blocks its own apply (GitHub rulesets and classic
+  protection; GitLab "pipelines must succeed"); the same name posted by anyone else still counts.
+- **`/ferry unlock [inventory]`** (#30, #48): write access, queued like any job and recorded in the
+  job history. The change's plan no longer applies after it; plan again.
+- **`/ferry help`**, and a reply to a `/ferry …` comment that doesn't parse (#30, #48), at most one
+  per change per 10 minutes. Other comments are never answered.
+- **Switches** (#28, #46): `ferry switch apply|autoplan off --reason …` (files in
+  `FERRY_SWITCH_DIR`), `FERRY_ALLOW_COMMANDS=plan` and `FERRY_DISABLE_AUTOPLAN=1` stop applies or
+  automatic plans without stopping the service, queued jobs included.
+- **`apply.require_inventory`** and per-inventory apply rules (#27, #45). A bare `/ferry apply`
+  stops at the first inventory that fails.
+- Local lab: the fake GitHub reports commit statuses; `lab.sh security` covers #21–#23, #25, #29
+  and #37.
+
 ## [0.2.1] - 2026-11-24
 
 Hardening and observability for `ferry serve`, from the 0.2.0 maintainer review (#11–#17). Both
@@ -80,6 +123,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[0.3.0]: https://github.com/jfryman/ferry/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jfryman/ferry/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jfryman/ferry/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jfryman/ferry/compare/v0.1.0...v0.1.1
