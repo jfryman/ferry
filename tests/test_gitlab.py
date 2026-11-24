@@ -93,14 +93,73 @@ def test_notes_skip_system_notes(gl):
     assert [n.id for n in be.list_notes(7)] == [1]
 
 
-def test_approvers_and_can_apply(gl):
+def test_can_apply(gl):
     fake, client, be = gl
-    fake.routes[("GET", "/projects/infra%2Fansible/merge_requests/7/approvals")] = {
-        "approved_by": [{"user": {"username": "james"}}]}
     fake.routes[("GET", "/users")] = lambda url, d: (200, [{"id": 5}] if "username=james" in url else [])
     fake.routes[("GET", "/projects/infra%2Fansible/members/all/5")] = {"access_level": 40}
-    assert be.approvers(7) == ["james"]
     assert be.can_apply("james") and not be.can_apply("nobody")
+
+
+MR7 = "/projects/infra%2Fansible/merge_requests/7"
+
+
+def approvals(fake, approved_by, versions=(), reset_on_push=None):
+    fake.routes[("GET", MR7)] = {"iid": 7, "sha": "head2"}
+    fake.routes[("GET", f"{MR7}/approvals")] = {"approved_by": approved_by}
+    fake.routes[("GET", f"{MR7}/versions")] = list(versions)
+    if reset_on_push is not None:
+        fake.routes[("GET", "/projects/infra%2Fansible/approvals")] = {"reset_approvals_on_push": reset_on_push}
+
+
+VERSIONS = [{"head_commit_sha": "head2", "created_at": "2026-11-20T12:00:00.000Z"},
+            {"head_commit_sha": "head1", "created_at": "2026-11-20T10:00:00.000Z"}]
+
+
+def test_approvals_count_only_after_the_head_arrived(gl):
+    fake, client, be = gl
+    approvals(fake, [{"user": {"username": "alice"}, "approved_at": "2026-11-20T11:00:00Z"},  # head1
+                     {"user": {"username": "lee"}, "approved_at": "2026-11-20T12:00:00.000Z"},  # same instant
+                     {"user": {"username": "kim"}, "approved_at": "2026-11-20T13:30:00.000+01:00"}],  # 12:30Z
+              VERSIONS)
+    assert be.approvers(7) == ["kim", "lee"]
+
+
+def test_head_pushed_back_counts_from_its_latest_arrival(gl):
+    fake, client, be = gl
+    versions = [{"head_commit_sha": "head2", "created_at": "2026-11-20T14:00:00Z"}, *VERSIONS]
+    approvals(fake, [{"user": {"username": "alice"}, "approved_at": "2026-11-20T13:00:00Z"}], versions)
+    assert be.approvers(7) == []
+
+
+def test_no_version_for_the_head_counts_nothing(gl):
+    fake, client, be = gl
+    approvals(fake, [{"user": {"username": "alice"}, "approved_at": "2026-11-20T13:00:00Z"}], VERSIONS[1:])
+    assert be.approvers(7) == []
+
+
+@pytest.mark.parametrize("reset, expected", [(True, ["alice"]), (False, []), (None, [])])
+def test_approvals_without_timestamps_need_reset_on_push(gl, reset, expected):
+    fake, client, be = gl
+    approvals(fake, [{"user": {"username": "alice"}}], VERSIONS, reset_on_push=reset)  # None: endpoint 404s
+    assert be.approvers(7) == expected
+
+
+@pytest.mark.parametrize("status, ci, service", [
+    ("mergeable", [], []), ("checking", ["checking"], ["checking"]), ("unchecked", ["unchecked"], ["unchecked"]),
+    ("ci_must_pass", [], ["ci_must_pass"]), ("ci_still_running", [], ["ci_still_running"])])
+def test_merge_status_for_ci_driver_and_service(gl, status, ci, service):
+    fake, client, be = gl
+    fake.routes[("GET", MR7)] = {
+        "iid": 7, "sha": "abc", "source_branch": "f", "target_branch": "main", "author": {"username": "bob"},
+        "state": "opened", "detailed_merge_status": status}
+    assert be.get_change_request(7).blocked_reasons == ci
+    assert GitLabBackend(client, "infra/ansible", pipeline_blocks=True).get_change_request(7).blocked_reasons == service
+
+
+def test_token_may_be_a_callable(gl):
+    fake, _, _ = gl
+    fake.routes[("GET", "/user")] = {"username": "bot"}
+    assert GitLabBackend(GitLabClient(API, lambda: "tok", transport=fake), 1).bot_username() == "bot"
 
 
 def test_tag_locks_are_exclusive(gl):

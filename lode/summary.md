@@ -1,31 +1,36 @@
 # ferry: summary
 
-Atlantis-style plan/apply/drift executor for Ansible. Built 2026-11-14 by Pip for James: first
-consumer is `infra/ansible` (Raspberry Pis that can't run Puppet); James also wants it reusable at
-his day job, so the engine is kept independent of GitLab CI.
+Atlantis-style plan/apply/drift for Ansible. The engine is independent of any one driver: it runs
+from GitLab CI (`ferry plan|apply|drift|unlock`), or as a long-lived webhook service
+(`ferry serve`) for a GitHub App or a GitLab project.
 
-## State (2026-11-14)
+## State (v0.2.0)
 
-- v0.1.1 (0.1.0 + diff header fix): engine, GitLab backend, tag locks, CLI, webhook core (parse + trigger), drift metrics.
-- Driver in use: GitLab CI in infra/ansible (`ferry plan` on MR, manual `ferry:apply`,
-  scheduled `ferry drift`, `ferry unlock` on main).
-- Not deployed: the webhook service (comment-triggered `/ferry apply`). Code + tests exist.
-- No real hosts yet: the Pi inventory is pending (SSH bootstrap with James).
+- Engine, policy, scope (`--limit` from changed files), per-host results, drift textfile metrics.
+- Drivers: GitLab CI (CLI, tag locks) and `ferry serve` (GitHub App or GitLab; SQLite locks in the
+  service's state file; per-job OpenBao credentials: workload-identity login, throwaway SSH
+  certificate, vault password).
+- `ferry executor`: playbooks run as another user/container that can't read the service's secrets.
+- Distribution: wheel on tags (GitLab CI, project PyPI registry); container image
+  `ghcr.io/jfryman/ferry` (GitHub Actions, linux/amd64 + linux/arm64). The service and the executor
+  are the same image with a different command. See practices.md for the release steps.
 
 ## Shape
 
 ```mermaid
 flowchart LR
   CLI[ferry.cli\nGitLab CI driver] --> E[ferry.engine.Engine]
-  WH[ferry.webhook\nfuture service] -.-> E
-  E --> VCS[VCSBackend\nvcs/gitlab.py]
-  E --> L[LockStore\nlocks.py: GitLab tags / memory]
-  E --> R[Runner\nrunner.py: ansible-playbook]
+  SVC[ferry.service / gitlab_service\nferry serve] --> E
+  SVC --> CR[credentials.py\nOpenBao per job]
+  SVC --> WS[workspace.py\nexact-SHA checkouts]
+  E --> VCS[VCSBackend\nvcs/github.py, vcs/gitlab.py]
+  E --> L[LockStore\nlocks.py: SQLite / GitLab tags / memory]
+  E --> R[Runner\nrunner.py, or executor.py over a socket]
   R --> CB[callback ferry_events\nJSON lines]
   CB --> RES[results.py\nper-host summary]
   E --> SC[scope.py\nfiles -> --limit]
   E --> P[policy.py]
-  E --> RE[render.py + sanitize.py\nMR comments]
+  E --> RE[render.py + sanitize.py\ncomments]
 ```
 
 See [decisions.md](decisions.md) for why it's built this way, README for user-facing behavior.

@@ -1,22 +1,32 @@
 """GitLab backend (REST v4, stdlib only).
 
-Auth: a project access token (api scope, Maintainer so it can create/delete lock tags). CI_JOB_TOKEN
-can't post MR notes, so ferry needs its own token (FERRY_GITLAB_TOKEN).
+Auth: a project access token with the api scope. The CI driver keeps its locks in tags, so its
+token needs Maintainer (create/delete tags); the service keeps locks in SQLite, so Developer is
+enough there (plus read_repository for the checkouts). CI_JOB_TOKEN can't post MR notes, so ferry
+needs its own token (FERRY_GITLAB_TOKEN). `token` may be a callable returning the current token.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Callable
 
 from .base import ChangeRequest, Note
 
+log = logging.getLogger("ferry.gitlab")
+
 # detailed_merge_status values that mean "this MR could not be merged as it stands".
-# ci_must_pass / ci_still_running are fine: the apply job itself runs inside the MR pipeline.
+# unchecked / checking / preparing mean GitLab hasn't worked it out yet: refuse and let the user
+# retry rather than apply on a guess (like GitHub's "unknown").
 BLOCKING_MERGE_STATUS = {
+    "unchecked",
+    "checking",
+    "preparing",
     "blocked_status",
     "broken_status",
     "conflict",
@@ -32,7 +42,13 @@ BLOCKING_MERGE_STATUS = {
     "locked_lfs_files",
 }
 
+# The MR's pipeline hasn't succeeded (yet). In the CI driver the apply job runs inside that pipeline,
+# so it is necessarily still running: not a blocker there. The service runs outside CI, so there
+# these block, as GitHub's required checks do (mergeable_state "blocked").
+PIPELINE_MERGE_STATUS = {"ci_must_pass", "ci_still_running"}
+
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, bytes]]
+Token = str | Callable[[], str]
 
 
 class GitLabError(RuntimeError):
@@ -51,7 +67,7 @@ def urllib_transport(method: str, url: str, headers: dict, body: bytes | None) -
 
 
 class GitLabClient:
-    def __init__(self, api_url: str, token: str, transport: Transport = urllib_transport):
+    def __init__(self, api_url: str, token: Token, transport: Transport = urllib_transport):
         self.api_url = api_url.rstrip("/")
         self._token = token
         self._transport = transport
@@ -60,7 +76,8 @@ class GitLabClient:
         url = f"{self.api_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        headers = {"PRIVATE-TOKEN": self._token, "Accept": "application/json"}
+        token = self._token() if callable(self._token) else self._token
+        headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
         body = None
         if data is not None:
             body = json.dumps(data).encode()
@@ -80,10 +97,18 @@ class GitLabClient:
         return out
 
 
+def _ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 class GitLabBackend:
-    def __init__(self, client: GitLabClient, project: str | int):
+    """pipeline_blocks: treat a pending or failed MR pipeline as a merge blocker (the service; see
+    PIPELINE_MERGE_STATUS). The CI driver leaves it off: its own job is part of that pipeline."""
+
+    def __init__(self, client: GitLabClient, project: str | int, pipeline_blocks: bool = False):
         self.client = client
         self.project = urllib.parse.quote(str(project), safe="")
+        self.pipeline_blocks = pipeline_blocks
         self._bot: str | None = None
 
     @property
@@ -93,7 +118,8 @@ class GitLabBackend:
     def get_change_request(self, cr_id: int) -> ChangeRequest:
         mr = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}")
         status = mr.get("detailed_merge_status") or mr.get("merge_status") or ""
-        blocked = sorted({status} & BLOCKING_MERGE_STATUS)
+        blocking = BLOCKING_MERGE_STATUS | (PIPELINE_MERGE_STATUS if self.pipeline_blocks else set())
+        blocked = sorted({status} & blocking)
         return ChangeRequest(
             id=mr["iid"],
             head_sha=mr["sha"],
@@ -109,6 +135,9 @@ class GitLabBackend:
             web_url=mr.get("web_url", ""),
         )
 
+    def merge_rule_blockers(self, cr: ChangeRequest) -> list[str]:
+        return []  # GitLab's detailed_merge_status already reports its rules in blocked_reasons
+
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()
         for d in self.client.paged(f"{self._p}/merge_requests/{cr_id}/diffs"):
@@ -118,8 +147,46 @@ class GitLabBackend:
         return sorted(files)
 
     def approvers(self, cr_id: int) -> list[str]:
-        data = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}/approvals")
-        return sorted(a["user"]["username"] for a in data.get("approved_by", []) or [])
+        """Users who approved the MR's current head.
+
+        GitLab doesn't record which commit an approval was for. With `approved_at` (newer GitLab),
+        an approval counts if it was given at or after the current head arrived (the created_at of
+        the MR diff version whose head_commit_sha is the MR's sha). Without it, approvals count only
+        if the project resets approvals on push (then any remaining approval is for the head);
+        otherwise none count, because an approval of an older commit would look the same.
+        """
+        sha = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}")["sha"]
+        data = self.client.request("GET", f"{self._p}/merge_requests/{cr_id}/approvals") or {}
+        approved = [a for a in data.get("approved_by") or [] if a.get("user")]
+        if not approved:
+            return []
+        if all(a.get("approved_at") for a in approved):
+            since = self._head_arrived(cr_id, sha)
+            if since is None:
+                log.warning("!%s: no diff version for head %s; not counting approvals", cr_id, sha[:8])
+                return []
+            return sorted(a["user"]["username"] for a in approved if _ts(a["approved_at"]) >= since)
+        if self._resets_approvals_on_push():
+            return sorted(a["user"]["username"] for a in approved)
+        log.warning("!%s: GitLab doesn't say when approvals were given and the project keeps approvals "
+                    "on push, so ferry can't tell an approval of the head from an older one; counting none. "
+                    "Enable 'Remove all approvals when commits are added' to fix this.", cr_id)
+        return []
+
+    def _head_arrived(self, cr_id: int, sha: str) -> datetime | None:
+        """When `sha` last became the MR's head (newest diff version with that head)."""
+        times = [_ts(v["created_at"]) for v in self.client.paged(f"{self._p}/merge_requests/{cr_id}/versions")
+                 if v.get("head_commit_sha") == sha and v.get("created_at")]
+        return max(times) if times else None
+
+    def _resets_approvals_on_push(self) -> bool:
+        try:
+            cfg = self.client.request("GET", f"{self._p}/approvals") or {}
+        except GitLabError as e:
+            if e.status in (403, 404):
+                return False
+            raise
+        return bool(cfg.get("reset_approvals_on_push"))
 
     def list_notes(self, cr_id: int) -> list[Note]:
         notes = self.client.paged(

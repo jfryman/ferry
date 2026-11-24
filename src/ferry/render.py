@@ -92,7 +92,7 @@ def _scope_block(scope: Scope, red: Redactor) -> str:
 
 def plan_comment(
     inventory: str, sha: str, scope: Scope, run: RunResult | None, meta: dict, red: Redactor,
-    max_chars: int, job_url: str = "",
+    max_chars: int, job_url: str = "", apply_how: str = "run the manual `ferry:apply` job in this MR's pipeline",
 ) -> str:
     head = f"### ferry plan: `{inventory}` @ `{sha[:8]}`"
     if run is None:
@@ -110,7 +110,7 @@ def plan_comment(
         if run.rc not in (0, 2) and not run.hosts:
             body += "\n\nansible-playbook failed before any host ran:\n\n" + _fence(red.text(run.log_tail) or "")
     foot = (
-        "\n\n---\nApply: run the manual `ferry:apply` job in this MR's pipeline. It re-checks that this "
+        f"\n\n---\nApply: {apply_how}. It re-checks that this "
         "plan is for the MR head commit, is clean and recent, that the MR is approved and mergeable, and "
         "that this MR holds the inventory lock."
     )
