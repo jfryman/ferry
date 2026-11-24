@@ -17,6 +17,7 @@ REJECT_REASONS = ("bad_auth", "duplicate", "stale", "future", "undated", "bad_js
 DURATION_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600)
 
 HELP = {
+    "ferry_jobs_by_trigger_total": ("counter", "Finished jobs by trigger (webhook, schedule, cli)."),
     "ferry_jobs_total": ("counter", "Jobs finished, by action and result (ok, failed, refused, skipped, error)."),
     "ferry_job_duration_seconds": ("histogram", "How long finished jobs took, by action."),
     "ferry_jobs_queued_total": ("counter", "Jobs queued from webhooks and the drift schedule, by action."),
@@ -90,8 +91,9 @@ class Metrics:
             h[-2] += value
             h[-1] += 1
 
-    def job_done(self, action: str, result: str, seconds: float, finished: float) -> None:
+    def job_done(self, action: str, result: str, seconds: float, finished: float, trigger: str = "webhook") -> None:
         self.inc("ferry_jobs_total", action=action, result=result)
+        self.inc("ferry_jobs_by_trigger_total", action=action, result=result, trigger=trigger)
         self.observe("ferry_job_duration_seconds", seconds, action=action)
         self.set("ferry_last_job_timestamp_seconds", finished, action=action)
 
@@ -111,6 +113,11 @@ class Metrics:
         for a in ACTIONS:
             for r in RESULTS:
                 counters.setdefault(("ferry_jobs_total", (("action", a), ("result", r))), 0.0)
+        for trigger in ("cli", "webhook", "schedule"):
+            for a in ACTIONS:
+                for r in RESULTS:
+                    counters.setdefault(("ferry_jobs_by_trigger_total",
+                        (("action", a), ("result", r), ("trigger", trigger))), 0.0)
         for reason in REJECT_REASONS:
             counters.setdefault(("ferry_webhook_rejected_total", (("reason", reason),)), 0.0)
         out = []

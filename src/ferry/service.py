@@ -56,7 +56,7 @@ from . import config as config_mod
 from . import render
 from .credentials import OpenBao, job_credentials
 from .engine import Engine
-from .locks import LockStore
+from .locks import LockStore, Lock
 from .runner import AnsibleRunner
 from .sanitize import Redactor
 from . import __version__
@@ -200,6 +200,12 @@ class Settings:
     allow_commands: tuple = ("plan", "apply")
     disable_autoplan: bool = False
     switch_dir: str | None = None
+    run_oidc_issuer: str | None = None
+    run_oidc_audience: str | None = None
+    run_allowed_subjects: tuple = ()
+    run_allowed_groups: tuple = ()
+    run_name_claim: str = "name"
+    run_lease_seconds: float = 300.0
 
 
 @dataclass
@@ -224,8 +230,33 @@ class Service:
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self.last_job: dict = {}
         self._job_red: Redactor | None = None  # the running job's redactor, for its error report
+        self._drift_recovery_pending = True
+        self._drift_recovery_mutex = threading.Lock()
+        self.runs = None
+        if self.settings.run_oidc_issuer and self.settings.run_oidc_audience:
+            from .runs import Runs
+            if self.settings.run_lease_seconds <= 0:
+                raise ValueError('run lease must be positive')
+            self.runs = Runs(self)
         self._status_off = False  # the code host refused a status for lack of permission: stop trying
         self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
+
+    def recover_drift(self):
+        """One recovery per service lifetime, never reap this process's own live drift.
+
+        Shared SQLite has one service owner. Only the configured serial sidecar can
+        certify no previous execution remains. With no sidecar, fail closed: an orphan
+        local process cannot safely be inferred dead from a new service PID.
+        """
+        with self._drift_recovery_mutex:
+            if not self._drift_recovery_pending:
+                return
+            if not self.settings.executor_socket:
+                return
+            from .executor import idle_barrier
+            if idle_barrier(self.settings.executor_socket):
+                self.locks.release_all('drift')
+                self._drift_recovery_pending = False
 
     def marker_key(self) -> bytes:
         """Signs ferry's plan/apply markers: derived from the webhook secret, which only the service
@@ -574,6 +605,9 @@ class Service:
     # ---- worker (slow path: one job at a time) --------------------------------------------------
 
     def run_job(self, job: Job) -> dict:
+        if self.runs:
+            self.runs.expire()
+        self.recover_drift()
         started = self.clock()
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
@@ -622,10 +656,12 @@ class Service:
         self.last_job = result
         log.info("job done: %s", result)
         try:
-            self.metrics.job_done(job.action, result["result"], finished - started, finished)
+            self.metrics.job_done(job.action, result["result"], finished - started, finished,
+                                  trigger="schedule" if job.action == "drift" else "webhook")
             self.state.record_job({"action": job.action, "pr": job.pr or None, "sha": job.sha[:12] or None,
                                    "user": job.user or None, "inventory": job.inventory,
-                                   "result": result["result"], "started": started, "seconds": result["seconds"]})
+                                   "result": result["result"], "started": started, "seconds": result["seconds"],
+                                   "trigger": "webhook" if job.action != "drift" else "schedule"})
         except Exception:  # bookkeeping never fails a job
             log.exception("couldn't record job %s for #%s", job.action, job.pr)
         return result
@@ -739,6 +775,14 @@ class Service:
                         culprit, why = inv, "was refused"
                         break  # in order: what comes after a refused inventory doesn't run (#27)
             todo = invs[: invs.index(culprit)] if culprit else list(invs)
+            if todo and job.action == "plan":
+                # Plans also must acquire before credentials: a CLI holder is never a PR to query.
+                pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, clock=self.clock)
+                for inv in todo:
+                    reason = pre._lock_conflict(inv, job.pr, job.sha, job.user)
+                    if reason:
+                        self._report_not_run(job, reason)
+                        return {"ok": False, "inventories": {inv: {"ok": False, "reasons": [reason]}}}
             if todo:
                 if job.action == "plan":
                     for inv in todo:
@@ -785,18 +829,31 @@ class Service:
                                           max_age_days=st.collections_max_age_days)
 
     def _drift(self) -> dict:
+        self.recover_drift()
+        if self.settings.executor_socket and self._drift_recovery_pending:
+            return {"ok": True, "skipped": "waiting for executor idle recovery"}
         main_dir, sha = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")
         env = self._collections(main_dir)
         results = {}
-        with job_credentials(self.bao, self.settings.ssh_user) as creds:
-            job_env = {**env, **creds}
-            red = self._redactor(cfg, job_env)
-            eng = Engine(cfg, main_dir, self._runner(cfg, main_dir, job_env, red), redactor=red, clock=self.clock)
-            for inv in cfg.inventories:
-                out = eng.drift(sha, inv.name, write_report=self.settings.drift_write_report,
-                                out_dir=self.workspace.root / "drift" / inv.name)
-                results[inv.name] = out.extra
+        for inv in cfg.inventories:
+            held = self.locks.try_acquire(Lock(inv.name, "drift", sha, "schedule", self.clock()))
+            if held:
+                results[inv.name] = {"skipped": "inventory locked"}
+                self.state.record_job({"action": "drift", "trigger": "schedule", "inventory": inv.name,
+                                       "sha": sha, "result": "skipped", "started": self.clock(), "seconds": 0})
+                continue
+            try:
+                # Acquire before any credential minting; PR and operator paths recognize string holders.
+                with job_credentials(self.bao, self.settings.ssh_user) as creds:
+                    job_env = {**env, **creds}
+                    red = self._redactor(cfg, job_env)
+                    eng = Engine(cfg, main_dir, self._runner(cfg, main_dir, job_env, red), redactor=red, clock=self.clock)
+                    out = eng.drift(sha, inv.name, write_report=self.settings.drift_write_report,
+                                    out_dir=self.workspace.root / "drift" / inv.name)
+                    results[inv.name] = out.extra
+            finally:
+                self.locks.release(inv.name, "drift")
         return {"ok": True, "sha": sha[:12], "drift": results}
 
     def _report_error(self, job: Job, error: str) -> None:
@@ -871,7 +928,8 @@ def make_handler(service: Service, max_body: int | None = None):
             self._send(status, text)
 
         def do_POST(self):
-            if self.path != "/webhook":
+            is_run = self.path == "/api/runs" or self.path.startswith("/api/runs/")
+            if self.path != "/webhook" and not (is_run and service.runs):
                 return self._send(404, "not found")
             if self.headers.get("Transfer-Encoding"):
                 self.close_connection = True
@@ -886,6 +944,9 @@ def make_handler(service: Service, max_body: int | None = None):
             body = self.rfile.read(length)
             if len(body) != length:
                 return  # the client went away mid-body
+            if is_run:
+                status, data = service.runs.request(self.path, self.headers, body)
+                return self._send(status, json.dumps(data), "application/json")
             status, text = service.receive(self.headers, body)
             self._send(status, text)
 
@@ -927,6 +988,18 @@ def serve(service: Service, host: str = "0.0.0.0", port: int = 8080) -> None:
     stop = threading.Event()
     threading.Thread(target=service.worker, args=(stop,), daemon=True, name="ferry-worker").start()
     threading.Thread(target=service.drift_scheduler, args=(stop,), daemon=True, name="ferry-drift").start()
+    def expire_runs():
+        while not stop.wait(1):
+            try:
+                service.recover_drift()
+            except Exception:
+                log.error("drift recovery unavailable")
+            if service.runs:
+                try:
+                    service.runs.expire()
+                except Exception:
+                    log.error('run lease cleanup unavailable')
+    threading.Thread(target=expire_runs, daemon=True, name='ferry-leases').start()
     httpd = BoundedHTTPServer((host, port), make_handler(service), service.settings.max_connections)
     log.info("ferry service for %s listening on %s:%s", service.settings.repo, host, port)
     try:

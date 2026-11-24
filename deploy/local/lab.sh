@@ -11,7 +11,8 @@ deliver() {  # deliver EVENT BODY [DELIVERY-ID]; keeps the last one in $LAB/last
   local sig
   sig="sha256=$(printf '%s' "$2" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)"
   printf '%s\n%s\n' "$1" "$2" > "$LAB/last-delivery"
-  BEFORE=$(curl -s localhost:18080/healthz)  # for wait_idle: a fast job can finish before it looks
+  BEFORE=$(curl -s localhost:18080/healthz)
+  BEFORE_JOB=$(curl -sf 'localhost:18080/jobs?limit=1' | python3 -c 'import json,sys; j=json.load(sys.stdin)["jobs"]; print(j[0]["id"] if j else 0)')
   curl -s -X POST localhost:18080/webhook -H "X-GitHub-Event: $1" -H "X-GitHub-Delivery: ${3:-lab-$(date +%s%N)}" \
     -H "X-Hub-Signature-256: $sig" -H "Content-Type: application/json" --data-binary "$2"
 }
@@ -22,20 +23,24 @@ comment() {  # comment USER BODY
   deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"$1\"},\"body\":\"$2\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
 }
 wait_idle() {  # until the worker has nothing queued and the last job changed
-  local before=${BEFORE:-$(curl -s localhost:18080/healthz)}
+  local before=${BEFORE_JOB:-0} latest
   for _ in $(seq 1 60); do
     sleep 1; now=$(curl -s localhost:18080/healthz)
-    [ "$now" != "$before" ] && echo "$now" | grep -q '"queued": 0' && { echo "$now"; return; }
+    latest=$(curl -sf 'localhost:18080/jobs?limit=1' | python3 -c 'import json,sys; j=json.load(sys.stdin)["jobs"]; print(j[0]["id"] if j else 0)')
+    [ "$latest" -gt "$before" ] && echo "$now" | grep -q '"queued": 0' && { echo "$now"; return; }
   done
-  echo "timed out waiting for the job; see: docker logs ferry-lab-ferry"
+  echo "timed out waiting for the job; see: docker logs ferry-lab-ferry" >&2
+  return 1
 }
 
 last_comment() { curl -s localhost:18999/_state | python3 -c 'import json,sys; c=json.load(sys.stdin)["comments"]; print(c[-1]["body"] if c else "")'; }
 expect() {  # expect NAME PATTERN TEXT: one PASS/FAIL line for the security scenarios
-  if printf '%s' "$3" | grep -qE -- "$2"; then echo "PASS $1"; else echo "FAIL $1: wanted /$2/, got: $(printf '%s' "$3" | head -c 300)"; fi
+  if printf '%s' "$3" | grep -qE -- "$2"; then echo "PASS $1"; else echo "FAIL $1: wanted /$2/, got: $(printf '%s' "$3" | head -c 300)"; return 1; fi
 }
 
 case "${1:-help}" in
+  run|run-apply|run-contention|run-expiry|run-denied)
+            . "$(dirname "$0")/operator-scenarios.sh" ;;
   open)     curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null
             pr_event opened "${2:-pip}"; echo; [ "${2:-pip}" = pip ] && wait_idle ;;
   plan)     comment "${2:-james}" "/ferry plan"; echo; wait_idle ;;
@@ -131,5 +136,5 @@ case "${1:-help}" in
   locks)    docker exec ferry-lab-ferry python -c 'import sqlite3; print(sqlite3.connect("/var/lib/ferry/state/locks.db").execute("select * from locks").fetchall())' ;;
   sshlog)   docker logs ferry-lab-target 2>&1 | grep -E "Accepted|refused|Refusing|CERT" | tail -${2:-5} ;;
   logs)     docker logs --tail "${2:-50}" ferry-lab-ferry ;;
-  *)        sed -n 's/^  \([a-z]*\)).*/  \1/p' "$0"; echo "  (see deploy/local/README.md)";;
+  *)        sed -n 's/^  \([a-z-]*\)).*/  \1/p' "$0"; echo "  run | run-apply | run-contention | run-expiry | run-denied"; echo "  (see deploy/local/README.md)";;
 esac

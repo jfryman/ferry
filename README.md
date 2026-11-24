@@ -209,6 +209,14 @@ sequenceDiagram
 - **Drift** every `FERRY_DRIFT_INTERVAL_HOURS` on the default branch.
 - `GET /healthz` reports the queue and the last job. Settings: `ferry serve --help`.
 
+**Edge routing:** `/jobs` and `/metrics` must never be publicly routed. They are unauthenticated
+internal audit/monitoring endpoints; use private-network access and scrape them internally.
+Allow only authenticated `POST /api/runs` and `POST /api/runs/{id}/lease|finish` at the operator
+edge; add `POST /webhook` only when enabling code-host hooks, with source restrictions.
+Deny every other path/method, including `/healthz` at the public edge. The current service uses
+one listener (no separate `FERRY_API_LISTEN`); enforce the split in your ingress/reverse proxy.
+Do not expose its backend port directly. The Nomad example has an explicit path allowlist.
+
 Deploy: `Dockerfile` (non-root image with ansible-core and git) and an example Nomad job in
 `deploy/nomad/ferry.nomad.hcl`. **To see the whole loop working locally** (OpenBao, Nomad-style
 workload identity, SSH certificates, a managed host, a fake GitHub), run `deploy/local/up.sh` and
@@ -483,3 +491,107 @@ Release: see `lode/practices.md`. In short: bump the version in `pyproject.toml`
 `ferry.__version__`, add a `CHANGELOG.md` entry, merge, then push an annotated tag `vX.Y.Z`. GitHub
 Actions builds and pushes the image, and you create a GitHub release from the changelog entry.
 Project notes for agents live in `lode/`.
+
+## Operator runs (`ferry run`)
+
+Run a **trusted** playbook on your machine, through the running service's inventory lock,
+SSH signer and audit, without a webhook:
+
+```sh
+ferry run -i staging --service https://ferry.example.com site.yml          # --check --diff
+ferry run -i staging --service https://ferry.example.com --apply site.yml  # explicit write
+```
+
+The tree must be clean (including untracked files) and HEAD reachable from an origin branch after
+fetching. The CLI generates a throwaway ed25519 key, renews its service lease, uses a private SSH
+ControlPath, and finishes and deletes its credential directory on exit, SIGINT or SIGTERM.
+SIGKILL cannot run cleanup: the service expires its lease. A failed renewal terminates Ansible.
+Use HTTPS and pin SSH host keys; `--insecure-http` disables both checks **only for the throwaway lab**.
+
+The API is off unless **both** `FERRY_RUN_OIDC_ISSUER` and `FERRY_RUN_OIDC_AUDIENCE` are configured.
+The issuer is OpenBao's identity issuer (for example `https://bao.example.com/v1/identity/oidc`),
+not the login/auth endpoint. Ferry reads `<issuer>/.well-known/keys` and accepts **RS256 only**;
+configure the OpenBao identity key accordingly. Signature, issuer, audience and expiry are checked
+on every call. Issuance/activation (`iat`/`nbf`) allow 30 seconds of clock skew; expiry
+never does. A person has no SSH signing permission and sends ferry an **identity JWT**, never
+an OpenBao API token. No webhook signature authorizes these API routes, or vice versa.
+
+Authorization requires both:
+- `FERRY_RUN_ALLOWED_SUBJECTS` (comma-separated entity IDs) or `FERRY_RUN_ALLOWED_GROUPS`
+  (comma-separated strings in a signed `groups` claim); and
+- an explicit matching subject or group in default-branch `ferry.yaml` for the inventory:
+
+```yaml
+inventories:
+  - name: staging
+    path: inventories/staging
+    apply:
+      run_allowed: [operators] # both check and apply; [] refuses both
+apply:
+  run_allowed: [] # default for inventories without an override
+```
+
+`POST /api/runs` accepts `{inventory, limit, mode: check|apply, sha, public_key}` and returns only
+that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
+`POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Start also requires a bounded repo-relative `playbook` path (client-asserted, not attested). Finish accepts
+`{ok, counts}`; results are operator-reported, not independent execution attestation.
+CLI check versus apply is **client-chosen**, not enforced by the certificate: both receive the
+same inventory credential. Scheduled drift now takes the same inventory lock before minting
+credentials and records/skips held inventories. After service restart, stale `drift` holders are
+recovered once the configured serial executor acknowledges an idle barrier (after prior job cleanup).
+Busy/unreachable/old executors retain the lock and retry; recovery runs once per service lifetime,
+never against a new active drift. With **no executor**, recovery fails closed: before manually
+releasing a stale drift row, the operator must stop/verify all old local Ansible processes are gone.
+An automatic local recovery cannot safely infer that from the service PID alone. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
+refuses **all new CLI runs, including check**. It does not revoke already-issued credentials. A PR lock refuses a run; a run lock refuses a PR.
+`FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
+actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
+`FERRY_RUN_NAME_CLAIM` selects a signed display-name claim (default `name`). The service strips
+Unicode control/format characters, collapses whitespace and bounds it to 128 characters; missing,
+non-string or empty names fall back to `sub`. Authorization and run ownership always use stable
+`sub`, never the display name. Lock holders show both; names are not metric labels.
+`/jobs` records an `issued` event when credentials are returned, then a completion/expiry event.
+Issuance is audit only, not an extra finish metric. It records `trigger: cli`, subject, `display_name`,
+client-asserted `playbook`, run ID, inventory, limit, mode, full SHA, result and the
+certificate **serial**. The role still owns `key_id_format`: match sshd's serial to the audit.
+`ferry_jobs_by_trigger_total{trigger="cli",action="plan|apply",result="..."}` counts finishes.
+Keep `/jobs` and `/metrics` private and off public routes (see deployment guidance above).
+
+### Admin-token demo login (Google OIDC later)
+
+`deploy/local/up.sh` provisions the complete demo. An admin configures an RS256 identity key,
+identity role `ferry` with audience `ferry`, an entity, an entity alias on the token auth mount,
+and a token role `ferry-operator` with `allowed_entity_aliases` restricted to that alias. Its policy
+can **only** read `identity/oidc/token/ferry`, not sign SSH certificates or read vault secrets.
+Then, using the admin credential **outside the playbook's environment**:
+
+```sh
+bao token create -role=ferry-operator -entity-alias=demo
+# Log in with the resulting operator token, not the admin token:
+bao login
+bao read -field=token identity/oidc/token/ferry
+ferry run -i staging --service https://ferry.example.com site.yml
+```
+
+The CLI defaults to `bao read -field=token identity/oidc/token/ferry` (this endpoint is GET, not
+`bao write`). Override with `--token-command` or `FERRY_RUN_TOKEN_COMMAND`; arguments are parsed
+without a shell. Google OIDC can later authenticate the same entity; the service is unchanged.
+
+**Security limits:** check/apply mode is a client assertion, not a credential restriction; the apply
+switch therefore gates both CLI modes. A stolen identity JWT can request credentials for allowed inventories until it
+expires, and renew or finish that subject's runs. A run ID alone grants nothing. Certificates cannot
+be revoked by finishing or missing a lease: an abandoned client may retain host access until the
+certificate expires, and existing SSH sessions may survive it. Lease expiry frees serialization,
+not host access. Keep certificate TTLs short, restrict principals and monitor sshd serials.
+The playbook runs as your local user: it can read its own key/password **and any files accessible
+to your user**, including login-token files. A minimal child environment and temporary HOME are
+hygiene, not a sandbox. CLI stdout/stderr are merged at the OS pipe (preserving observed write order), continuously drained,
+and buffered up to **1 MiB** in memory before whole-output redaction (including every non-empty
+fetched vault password, certificate and private key, regardless of length). Output appears after
+Ansible exits. If the limit is exceeded, **all captured output is withheld** and an explicit truncation
+notice is printed; this avoids exposing a partial secret/PEM prefix. Whole-output buffering is deliberate:
+arbitrary configured regexes and multiline credentials cannot be safely streamed with a fixed window. Redaction is a safety net: use `no_log: true` and
+`diff: false` on secret-bearing tasks; arbitrary transformed values and sensitive diffs cannot be
+reliably inferred by text filtering. Use a dedicated operator account/container for untrusted code; the lab does.
+The client SHA/limit/mode and result are audit assertions by an authorized operator, not proof that
+an arbitrary client ran those exact bytes. Protect operator identities as privileged credentials.

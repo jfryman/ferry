@@ -10,3 +10,5 @@ User-facing behavior (gates, locks, drift metrics, threat model) is in the top-l
 - `deploy/local/README.md`: the local lab (full service loop, OpenBao, SSH certificates), how it maps to production, things to try
 - `CHANGELOG.md`: release notes per version
 - `.github/workflows/`: `ci.yml` (tests), `image.yml` (multi-arch image to GHCR)
+
+- [operator-runs.md](operator-runs.md): operator identity, shared lease locks, credential and audit boundaries

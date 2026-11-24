@@ -16,7 +16,7 @@ import yaml
 
 
 # What an inventory may override from the top-level `apply` (#27): who may apply it, how many approvals.
-INVENTORY_APPLY_KEYS = ("allowed_users", "min_approvals")
+INVENTORY_APPLY_KEYS = ("allowed_users", "min_approvals", "run_allowed")
 
 
 @dataclass
@@ -69,6 +69,8 @@ class RedactConfig:
 
 @dataclass
 class ApplyConfig:
+    # CLI requires an explicit matching subject or group for each inventory (both modes).
+    run_allowed: list[str] = field(default_factory=list)
     min_approvals: int = 1
     # If false, the MR author's own approval doesn't count.
     allow_author_approval: bool = False
@@ -178,6 +180,9 @@ def _check_inventory_apply(inv: InventoryConfig) -> None:
     users = inv.apply.get("allowed_users", [])
     if not isinstance(users, list) or not all(isinstance(u, str) and u for u in users):
         raise ValueError(f"{where}: allowed_users must be a list of usernames")
+    allowed = inv.apply.get("run_allowed", [])
+    if not isinstance(allowed, list) or not all(isinstance(x, str) and x for x in allowed):
+        raise ValueError(f"{where}: run_allowed must be a list of subjects/groups")
     n = inv.apply.get("min_approvals", 0)
     if not isinstance(n, int) or isinstance(n, bool) or n < 0:
         raise ValueError(f"{where}: min_approvals must be a whole number >= 0")
@@ -202,6 +207,9 @@ def load(path: str | Path) -> Config:
         raise ValueError("ferry.yaml: at least one inventory is required")
     for inv in cfg.inventories:
         _check_inventory_apply(inv)
+    if not isinstance(cfg.apply.run_allowed, list) or not all(
+            isinstance(x, str) and x for x in cfg.apply.run_allowed):
+        raise ValueError("ferry.yaml: apply.run_allowed must be a list of subjects/groups")
     if not isinstance(cfg.base_branches, list) or not all(isinstance(b, str) and b for b in cfg.base_branches):
         raise ValueError("ferry.yaml: base_branches must be a list of branch names")
     return cfg

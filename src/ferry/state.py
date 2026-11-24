@@ -10,6 +10,7 @@ MemoryState is the same interface in memory, for tests and one-off runs.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -23,7 +24,7 @@ HEAD_MAX_ROWS = 20_000
 JOB_HISTORY = 200
 # What the job history keeps: no error text or refusal reasons (they can name internal hosts and
 # paths, and the history is served unauthenticated); those are on the PR and in the service log.
-JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds")
+JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds", "trigger", "run_id", "subject", "limit", "mode", "certificate_serial", "counts", "display_name", "playbook")
 
 
 class MemoryState:
@@ -115,6 +116,12 @@ class SQLiteState(MemoryState):
             db.execute("CREATE TABLE IF NOT EXISTS pushers (pr INTEGER NOT NULL, user TEXT NOT NULL, at REAL NOT NULL,"
                        " PRIMARY KEY (pr, user))")
 
+        with closing(self._connect()) as db:
+            existing = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+            for col in JOB_FIELDS[9:]:
+                if col not in existing:
+                    db.execute(f'ALTER TABLE jobs ADD COLUMN "{col}" TEXT')
+
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None: we issue BEGIN IMMEDIATE ourselves. timeout waits out another writer.
         return sqlite3.connect(self.path, timeout=30, isolation_level=None)
@@ -178,8 +185,8 @@ class SQLiteState(MemoryState):
     def record_job(self, job):
         cols = JOB_FIELDS[1:]
         with closing(self._connect()) as db:
-            cur = db.execute(f"INSERT INTO jobs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                             [job.get(c) for c in cols])
+            cur = db.execute(f"INSERT INTO jobs ({', '.join(chr(34) + c + chr(34) for c in cols)}) VALUES ({', '.join('?' * len(cols))})",
+                             [json.dumps(job.get(c)) if c == "counts" and job.get(c) is not None else job.get(c) for c in cols])
             db.execute("DELETE FROM jobs WHERE id <= ?", (cur.lastrowid - self.job_history,))
             return cur.lastrowid
 
@@ -187,5 +194,9 @@ class SQLiteState(MemoryState):
         if limit <= 0:
             return []
         with closing(self._connect()) as db:
-            rows = db.execute(f"SELECT {', '.join(JOB_FIELDS)} FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(zip(JOB_FIELDS, r)) for r in rows]
+            rows = db.execute(f"SELECT {', '.join(chr(34) + c + chr(34) for c in JOB_FIELDS)} FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        jobs = [dict(zip(JOB_FIELDS, r)) for r in rows]
+        for job in jobs:
+            if job.get('counts') is not None:
+                job['counts'] = json.loads(job['counts'])
+        return jobs

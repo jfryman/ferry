@@ -231,3 +231,20 @@ def test_serve_uses_the_executor_when_configured(monkeypatch, tmp_path):
     assert isinstance(runner, ExecutorRunner) and runner.socket_path == "/run/ferry/executor.sock"
     monkeypatch.delenv("FERRY_EXECUTOR_SOCKET")
     assert cli._runner_factory() == {}
+
+
+def test_idle_barrier_after_job_and_cleanup(executor, monkeypatch):
+    from ferry.executor import idle_barrier
+    sock, repo, proc = executor
+    assert idle_barrier(sock, timeout=1)
+    # A request waiting for its body occupies the serial executor; a queued idle
+    # request cannot acknowledge until that active connection has completed.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as busy:
+        busy.connect(sock)
+        busy.sendall(b'{')
+        assert not idle_barrier(sock, timeout=0.05)
+    for _ in range(30):
+        if idle_barrier(sock, timeout=0.1):
+            break
+    else:
+        pytest.fail('executor did not become idle')

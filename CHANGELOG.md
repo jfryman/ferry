@@ -2,6 +2,23 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## Unreleased
+
+### Security
+- Pending operator leases cannot be finished/renewed before signing completes; validate lock
+  ownership before credentials return. Drift now participates in inventory locking.
+- Audit issuance immediately with a client-asserted relative playbook path; redact CLI terminal
+  streams and reject non-standard JSON NumericDates.
+- Operator hardening: apply disable gates both client-chosen modes; safe configurable display
+  identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
+
+### Added
+- `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,
+  short renewable leases, OpenBao identity JWT verification and per-run SSH/vault credentials.
+- Default-branch per-inventory operator authorization, kill switches, certificate-serial audit
+  and fixed-label metrics by trigger. The API is disabled unless issuer and audience are set.
+- Admin-token identity demo and local operator check/apply, contention, expiry and denial scenarios.
+
 ## [0.3.0] - 2026-11-24
 
 Security fixes and Atlantis-parity features for `ferry serve`, from the 0.2.1 review (#21–#30,

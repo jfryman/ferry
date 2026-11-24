@@ -149,3 +149,72 @@ To change ferry and re-test: edit `src/ferry/...`, then `python -m pytest -q`, t
 - **Host keys:** the image checks host keys (`ANSIBLE_HOST_KEY_CHECKING=True`). Mount a known_hosts file at `/etc/ssh/ssh_known_hosts` in the executor (or the service, without an executor): pinned keys, or `@cert-authority` lines if your hosts have OpenBao-signed host certificates. The lab turns checking off for its throwaway target (`up.sh`).
 - **Webhook ingress:** expose only `POST /webhook`, restricted to GitHub's hook IP ranges (GitHub publishes them at `api.github.com/meta`).
 - **One instance:** locks are one SQLite file, so run one ferry per config repo, as Atlantis does.
+
+The shared executor socket and checkout work directory use native runtime volumes
+(`ferry-lab-run`, `ferry-lab-work`). This avoids Docker Desktop bind-mount socket permissions
+and deleted/recreated checkout path inode caching. `down.sh` removes both volumes.
+
+## Operator runs through the same service
+
+`up.sh` also builds `ferry-operator:lab` (the ferry image plus the OpenBao CLI) and provisions
+OpenBao's **identity OIDC** endpoint, not another JWT auth mount:
+
+- RS256 key `ferry`, role `ferry`, client/audience `ferry`, five-minute identity tokens;
+- issuer `http://ferry-lab-bao:8200/v1/identity/oidc` (plain HTTP only in this isolated lab);
+- entities `lab-demo` (allowed) and `lab-denied` (valid identity, not allowed by ferry);
+- aliases on the `token/` mount, and token roles `ferry-operator` / `ferry-operator-denied`
+  whose `allowed_entity_aliases` bind
+  each demo login to its entity. The dev admin creates these logins; a real operator uses OIDC login.
+
+The two login tokens live under `$LAB_DIR/operators/`, mode 0600. They can **only** request an
+identity token from `identity/oidc/token/ferry`; they cannot sign SSH keys or read the vault password.
+The service allows the demo **entity ID** via `FERRY_RUN_ALLOWED_SUBJECTS`, not its display name,
+and uses an eight-second lease so the expiry demonstration takes seconds rather than minutes.
+
+```bash
+deploy/local/lab.sh close           # release any PR-held lock first
+deploy/local/lab.sh run             # --check --diff by default
+deploy/local/lab.sh run-apply       # explicit apply; then inspect `lab.sh motd`
+deploy/local/lab.sh run-denied      # valid RS256 identity, unauthorized subject; must fail
+deploy/local/lab.sh run-contention  # CLI lease refuses PR apply; PR lock refuses CLI
+deploy/local/lab.sh run-expiry      # SIGKILL CLI; after 10s another CLI acquires and finishes
+curl -s localhost:18080/jobs        # trigger=cli and subject, alongside webhook jobs
+```
+
+Contention and expiry close/reopen PR #1 and temporarily create `ferry-lab-operator`; they should
+be run serially against a fresh, healthy lab (before hostile-playbook scenarios). The long-running
+`slow.yml` is committed in the demo remote, so these tests do not bypass the clean-tree/remote-SHA
+checks. Scenarios fail nonzero on an unexpected acceptance or missing expected refusal.
+
+Each CLI runs in a disposable container as your host UID. It clones the config repo from a
+read-only mounted remote; its `origin` is configured and its working tree is clean. The only login
+mounted is the selected operator's token. **No service credentials, signing role, workload JWT,
+state DB or executor socket are mounted.** SSH host checking is disabled only for the throwaway
+lab target, matching the webhook lab. The CLI executes Ansible on the operator, not in the service.
+
+The equivalent command inside that container is:
+
+```bash
+ferry run -i lab --service http://ferry-lab-ferry:8080 \
+  --token-command 'bao read -field=token identity/oidc/token/ferry' site.yml
+```
+
+**OpenBao CLI detail:** OpenBao 2.7.2 generates identity tokens with `bao read` (HTTP GET).
+`bao write -field=token identity/oidc/token/ferry` fails before making a request because there is
+no data; forcing the write uses PUT, not the endpoint's GET. The lab therefore explicitly supplies
+the supported `--token-command` rather than relying on a write-based default.
+
+API clients send `Authorization: Bearer <identity-token>` and JSON to `POST /api/runs`:
+`{inventory: "lab", limit: "target", mode: "check", sha: "<remote-commit>", public_key: "ssh-ed25519 ..."}`.
+A successful response includes `run_id`, `certificate`, `vault_password`, `lease_expires_at`.
+The same subject renews at `POST /api/runs/{run_id}/lease` and releases at
+`POST /api/runs/{run_id}/finish` with `{ok, counts, changed_hosts}`. Never print the response's
+credentials into shared logs. A held inventory returns 409, a valid but denied subject 403.
+
+### Readable operator identities
+The demo identity role emits `name` from `identity.entity.name`. Authorization remains on
+its stable entity UUID (`sub`), not this claim. `lab.sh locks` shows
+`run:<id> (lab-demo; sub=<uuid>)`; `GET /jobs` records both `subject` and
+`display_name: lab-demo`. Production can select another signed display claim with
+`FERRY_RUN_NAME_CLAIM`; names are sanitized/bounded and never used as metric labels.
+CLI check/apply is chosen by the client, so disabling applies refuses both CLI modes.

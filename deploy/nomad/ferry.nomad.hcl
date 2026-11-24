@@ -21,8 +21,15 @@ job "ferry" {
     service {
       name = "ferry"
       port = "http"
-      # Route only POST /webhook from GitHub (restrict to GitHub's hook IP ranges at the edge).
-      tags = ["traefik.enable=true"]
+      # Never publicly route /jobs or /metrics: unauthenticated internal audit/monitoring.
+      # This is one backend listener; do not publish its port directly. Private scrape only.
+      # Operator edge: allow POST /api/runs and its lease/finish routes, deny all other paths.
+      # If enabling hooks later, add a separate POST /webhook router restricted to hook IPs.
+      tags = [
+        "traefik.enable=true",
+        "traefik.http.routers.ferry.rule=Method(`POST`) && (Path(`/api/runs`) || PathRegexp(`^/api/runs/[a-f0-9]{32}/(lease|finish)$`))",
+        "traefik.http.routers.ferry.tls=true",
+      ]
       check {
         type     = "http"
         path     = "/healthz"
