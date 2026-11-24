@@ -38,7 +38,7 @@ flowchart LR
 | Lab piece | What it stands in for in production (Atomic) |
 |---|---|
 | `ferry-lab-ferry` (this repo's `Dockerfile`) | The ferry Nomad job (`deploy/nomad/ferry.nomad.hcl` is the starting point; the real one goes in atomic-terraform `cluster/`) |
-| `fakegh.py` on :18999 | api.github.com plus the GitHub App. It answers `/app`, the installation token, PR, files, reviews, comments and collaborator permission for PR #1. Writers: `james`, `pip`. |
+| `fakegh.py` on :18999 | api.github.com plus the GitHub App. It answers `/app`, the installation token, PR, files, reviews, comments, collaborator permission, the branch's rulesets and the GraphQL review decision for PR #1. Writers: `james`, `pip`. |
 | `/tmp/ferry-lab/remote/acme/ansible.git` with `refs/pull/1/head` | github.com/Atomic-Industries/atomic-ansible (ferry fetches with `FERRY_GITHUB_GIT_URL=file:///remote`) |
 | `ferry-lab-bao`, dev mode, root token `lab` | OpenBao on ops/ceph-1/ceph-2 |
 | `ssh-client-signer/` mount, role `ferry`, policy `ssh-sign-ferry` (set by `up.sh` with the CLI) | atomic-terraform `openbao/ssh.tf` (#230): the same values |
@@ -98,6 +98,10 @@ docker logs ferry-lab-target 2>&1 | grep Accepted | sed -E 's/.*serial ([0-9]+).
 - **OpenBao down** (`docker stop ferry-lab-bao`), then `lab.sh plan`: ferry comments the error on the PR (`ferry couldn't finish: URLError ...`) and the service stays up (`/healthz`). Checked Nov 23.
 - **The target refuses certificates** (`docker exec ferry-lab-target sh -c 'echo nobody > /etc/ssh/auth_principals/root'`), then `lab.sh open`: `❌ plan is not clean ... 1 unreachable`, so apply would be refused. Checked Nov 23.
 - **Config comes from main:** change `ferry.yaml` on the PR branch (for example `apply: {min_approvals: 0}`), `lab.sh push`, then `lab.sh apply`. An approval is still required.
+- **GitHub's own rules:** require two approvals on `main`, then approve once and apply. ferry refuses, naming the ruleset:
+  ```
+  curl -s localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":2}}]}'
+  ```
 - **Duplicate deliveries and bad signatures:** re-send a body with the same `X-GitHub-Delivery`, or with a wrong `X-Hub-Signature-256` (expect 401).
 - **Drift:** add `-e FERRY_DRIFT_INTERVAL_HOURS=0.01` to the ferry container in `up.sh`. Drift runs on `main` and writes `ansible_drift.prom` on the target, if it has a textfile dir.
 

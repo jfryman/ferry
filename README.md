@@ -47,6 +47,8 @@ All re-checked inside the apply job, against live GitLab state:
   (`ci_still_running` is fine: the apply job runs in that pipeline).
 - `apply.min_approvals` approvals (the author's own doesn't count unless `allow_author_approval`). Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
 - The person running it has Developer+ (or is in `apply.allowed_users`).
+- **GitHub: the code host's own rules would allow the merge**, on top of ferry's approval check
+  (both must pass). See [GitHub branch protection and rulesets](#github-branch-protection-and-rulesets).
 - The MR holds the inventory lock (or the lock is free / its holder MR is closed or merged).
 
 ## Locks
@@ -141,8 +143,20 @@ sequenceDiagram
 Deploy: `Dockerfile` (non-root image with ansible-core and git) and an example Nomad job in
 `deploy/nomad/ferry.nomad.hcl`. **To see the whole loop working locally** (OpenBao, Nomad-style
 workload identity, SSH certificates, a managed host, a fake GitHub), run `deploy/local/up.sh` and
-follow `deploy/local/README.md`. The GitHub App needs contents: read, pull requests and issues: write,
-and webhooks for pull_request and issue_comment, delivered to `POST /webhook` with a secret.
+follow `deploy/local/README.md`. The GitHub App's permissions are below; it needs webhooks for
+pull_request and issue_comment, delivered to `POST /webhook` with a secret.
+
+| App permission | Why |
+|---|---|
+| Contents: read | fetch the default branch and the PR head |
+| Pull requests: write | read PRs, reviews and the review decision (GraphQL `reviewDecision`) |
+| Issues: write | plan / apply comments |
+| Metadata: read (always granted) | collaborator permission; the branch's active rulesets |
+| Checks: read, Commit statuses: read | which required checks passed on the PR head |
+| Administration: read | classic branch protection rules (only if the target branch uses classic protection; ferry refuses to apply until it can read them) |
+
+Don't give the App a bypass on the branch's rulesets: it doesn't need one, and GitHub computes the
+merge state for the viewer.
 
 The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unchanged.
 
@@ -159,11 +173,41 @@ The GitLab path above (CI driver plus `ferry.webhook`'s pipeline trigger) is unc
 | PR, commit, user | `--mr`, `--sha`, `--user` (no CI variables are trusted for the user) |
 
 Mapping: notes are issue comments; approvals are the latest decisive review per user that approves
-the current head; "blocked" merge states are GitHub's `mergeable_state` `dirty`, `blocked`, `behind`,
-`draft` and `unknown`; applying needs `write`, `maintain` or `admin`. Locks live in the service's
+the current head; "blocked" merge states are GitHub's `mergeable_state` `dirty`, `behind`, `draft`
+and `unknown` (`blocked` is explained rule by rule, below); applying needs `write`, `maintain` or `admin`. Locks live in the service's
 own SQLite file (like Atlantis's BoltDB), not in the repo: no tags, no repo write access, and one
 ferry service per file. Intended deployment is a service holding a GitHub App (see the threat model
 above), not `pull_request` workflows.
+
+### GitHub branch protection and rulesets
+
+On apply, ferry also asks GitHub whether the PR could merge under the target branch's classic branch
+protection and active rulesets, and refuses with a comment naming the unmet rule. ferry's own check
+(an approval of the current head from someone with write access) still applies: both must pass.
+
+ferry uses GitHub's own verdict where GitHub computes one, and reads the rules to name what's unmet:
+
+| Rule | How ferry checks it |
+|---|---|
+| Required approving reviews, CODEOWNERS review, dismiss stale reviews, last-push approval, requested changes | GraphQL `reviewDecision` must be `APPROVED` when any review rule applies. The comment names the count and the code owners still requested. |
+| Required status checks | Each check required by a rule, or marked `isRequired` by GitHub, must have passed (success, neutral, skipped) on the head, from the pinned App if the rule pins one. |
+| Conversation resolution | No unresolved review threads. |
+| Anything else (`mergeStateStatus` `BLOCKED`) | If GitHub says blocked and none of the above explains it, ferry refuses, listing rules it can't evaluate (merge queue, required deployments, signed commits, locked branch). |
+
+**ferry's own required check.** If a branch requires a check that only passes once ferry has applied
+(a ferry status, or the CI job that runs `ferry apply`), requiring it would deadlock the apply. ferry
+ignores a required check that was posted by its own App (`FERRY_GITHUB_APP_ID`, or the bot login) or
+whose name is in `FERRY_GITHUB_OWN_CHECKS` (comma-separated, from the service's environment, never
+from the repo). A `BLOCKED` merge state explained only by such a check doesn't refuse the apply.
+
+**Fails closed.** If ferry can't read a rule source (a missing App permission, an API error, more
+than 100 checks or review threads), it refuses and names the App permission to add.
+
+**Gaps.** ferry's checks are by name: a check name from another App satisfies an unpinned required
+check, as on GitHub. Rules ferry can't evaluate are trusted to GitHub's merge state, which is computed
+for the App (so an App with bypass would see `CLEAN`). Required linear history, the merge method and
+push restrictions don't affect whether a PR may merge, so they aren't checked. "Require branches to be
+up to date" is GitHub's `behind` state, already refused.
 
 ## Development
 

@@ -167,6 +167,11 @@ class Engine:
             reasons.append("MR has unresolved blocking discussions")
         for r in cr.blocked_reasons:
             reasons.append(f"MR is not mergeable ({r})")
+        # The code host's own rules (GitHub branch protection / rulesets) on top of ferry's: ferry never
+        # applies what the host would refuse to merge. Only for the head being applied; a stale run is
+        # already refused above.
+        if cr.open and cr.head_sha == sha:
+            reasons.extend(self.vcs.merge_rule_blockers(cr))
         # An approval counts only from someone who could apply it themselves: on a public GitHub repo
         # anyone can leave an approving review, and the code host's own rules may not require more.
         # ferry's own account never counts (a job that got hold of its credentials could approve).
