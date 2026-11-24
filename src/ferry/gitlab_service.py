@@ -6,8 +6,11 @@ and turned into a Job. The queue, the worker, the workspace and the engine are t
 Events (one project webhook, "Merge request events" + "Comments", with a secret token):
   Merge Request Hook  open / reopen / update with new commits / draft -> ready   plan (plan rule)
   Merge Request Hook  close / merge                                            release the MR's locks
-  Note Hook on an MR  "/ferry plan [inventory]"                                plan, if the author may
-  Note Hook on an MR  "/ferry apply [inventory]"                               apply (the engine checks every gate)
+  Note Hook on an MR  "/ferry plan [inventory] [--sha C]"                       plan, if the author may
+  Note Hook on an MR  "/ferry apply [inventory] [--sha C]"                      apply (the engine checks every gate)
+
+Notes are pinned to the MR head the commenter saw: the hook's merge_request.last_commit must still be
+the head, and that head's diff version must predate the note (or `--sha` names it).
 
 GitLab doesn't sign the body: it sends the secret itself in X-Gitlab-Token, compared here in
 constant time. Keep SSL verification on in the webhook so the secret only travels over TLS.
@@ -24,9 +27,12 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 
-from .service import Job, Service
+from .service import Job, Service, parse_time
 from .webhook import COMMAND_RE
+
+log = logging.getLogger("ferry.gitlab_service")
 
 MR_PLAN_ACTIONS = {"open", "reopen"}
 MR_CLOSE_ACTIONS = {"close", "merge"}
@@ -124,7 +130,7 @@ class GitLabService(Service):
         stale = self._stale(note.get("created_at"), note.get("updated_at"))
         if stale:
             return 202, stale
-        action, inventory = m.group(1), m.group(2)
+        action, inventory, named = m.group(1), m.group(2), m.group(3)
         iid = int(p["merge_request"]["iid"])
         # Both commands need Developer access, checked here: a refused request never costs a checkout
         # or a credential (the engine checks again, along with every other apply gate).
@@ -132,4 +138,16 @@ class GitLabService(Service):
             self.vcs.post_note(iid, f"`/ferry {action}` needs Developer access to this project; @{user} doesn't have it.")
             return 202, f"{action} refused: no Developer access"
         cr = self.vcs.get_change_request(iid)
-        return self._enqueue(Job(action, iid, cr.head_sha, user, inventory, delivery))
+        # The hook carries the MR's head as GitLab saw it; the MR's diff versions say when it arrived.
+        payload_head = ((p["merge_request"].get("last_commit") or {}).get("id")) or None
+        sha = self._pin_head(cr, action, parse_time(note["created_at"]), named, payload_head)
+        if sha is None:
+            return 202, f"{action} refused: the head isn't the one commented on"
+        return self._enqueue(Job(action, iid, sha, user, inventory, delivery, pinned=True))
+
+    def _head_since(self, number: int, sha: str) -> float | None:
+        try:
+            return self.vcs.head_arrived_at(number, sha)
+        except Exception:  # can't tell: refuse (the caller says why), never guess
+            log.warning("!%s: couldn't read the MR's diff versions", number, exc_info=True)
+            return None

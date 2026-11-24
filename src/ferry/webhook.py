@@ -22,7 +22,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .vcs.gitlab import GitLabClient
 
-COMMAND_RE = re.compile(r"^\s*/(?:ferry\s+)?(plan|apply)(?:\s+(?:-i\s+|--inventory[ =])?([A-Za-z0-9_.-]+))?\s*$")
+# /ferry plan|apply [inventory] [--sha COMMIT]: group 1 the action, 2 the inventory, 3 the commit.
+COMMAND_RE = re.compile(r"^\s*/(?:ferry\s+)?(plan|apply)(?:\s+(?:-i\s+|--inventory[ =])?([A-Za-z0-9_.-]+))?"
+                        r"(?:\s+--sha[ =]([0-9a-fA-F]{7,40}))?\s*$")
 
 
 @dataclass
