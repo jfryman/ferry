@@ -14,6 +14,8 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 - CLI certificates ask OpenBao for a short TTL (`FERRY_RUN_CERT_TTL`, default 15m) and are
   refused if they come back longer (#53).
 - `--insecure-http` no longer turns off SSH host-key checking; that is `--no-host-key-checking` (#54).
+- Operator identity keys (JWKS) are cached for 5 min; an unknown `kid` refetches at most every
+  30 s, so bad tokens no longer cause an outbound fetch each (#55).
 - `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
   entries and empty group claims never match.
 

@@ -556,6 +556,9 @@ actual expiry. SQLite persists leases across restarts. There are no tokens or pa
 which is also the longest a CLI run can last. A certificate that comes back longer than that (plus 60 s)
 is refused. The certificate is not scoped to the locked inventory: it is valid wherever the signing
 role's principal is trusted, until it expires. Keep the TTL short and the principal narrow.
+The service fetches the issuer's keys from `<issuer>/.well-known/keys` and caches them for five
+minutes. A token with an unknown `kid` triggers at most one refetch every 30 s. If the issuer is
+unreachable, keys fetched within the last hour are still used; after that, runs are refused.
 `FERRY_RUN_NAME_CLAIM` selects a signed display-name claim (default `name`). The service strips
 Unicode control/format characters, collapses whitespace and bounds it to 128 characters; missing,
 non-string or empty names fall back to `sub`. Authorization and run ownership always use stable
