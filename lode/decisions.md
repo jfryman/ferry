@@ -88,3 +88,15 @@ enough to apply in the local lab. The engine now counts an approval only if `can
 that user (write on GitHub, Developer+ on GitLab) and it isn't ferry's own account (a job that got
 hold of the service's credentials could otherwise approve). With `apply.allowed_users` set, the
 applier must be listed **and** still have access.
+
+## GitHub's own merge rules gate apply too
+2026-11-24: ferry's approval check is its own floor, not the repo's rules. A branch could require two
+reviews, a CODEOWNERS review or a passing check and ferry would still apply on one approval. Apply
+now also asks GitHub (`merge_rule_blockers`, `vcs/github_protection.py`): GraphQL `reviewDecision`,
+per-check `isRequired`, and `mergeStateStatus`, with classic protection and active rulesets read to
+name the unmet rule and find required checks that never reported. GitHub's verdict is preferred over
+re-implementing the rules; the rules are still checked independently because `mergeStateStatus` is
+computed for the viewer (an App with bypass sees CLEAN). Checks posted by ferry's own App, or named in
+`FERRY_GITHUB_OWN_CHECKS` (service env, never the repo), are ignored so a required ferry check can't
+deadlock the apply. Unreadable rules (missing App permission) refuse, naming the permission. REST
+`mergeable_state` `blocked` no longer refuses by itself: the new check explains it.

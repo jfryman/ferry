@@ -41,6 +41,40 @@ def pr(number=7, sha="abc", state="open", merged=False, draft=False, mergeable=T
             "html_url": f"https://github.com/acme/ansible/pull/{number}"}
 
 
+def gql_pr(sha="abc", decision=None, merge_state="CLEAN", contexts=(), threads=(), code_owner_requests=(),
+           more_contexts=False, total_threads=None):
+    """GraphQL pullRequest, as protection.PR_QUERY asks for it."""
+    return {"headRefOid": sha, "reviewDecision": decision, "mergeStateStatus": merge_state,
+            "reviewRequests": {"nodes": [{"asCodeOwner": True, "requestedReviewer": r} for r in code_owner_requests]},
+            "reviewThreads": {"totalCount": len(threads) if total_threads is None else total_threads,
+                              "nodes": [{"isResolved": t} for t in threads]},
+            "commits": {"nodes": [{"commit": {"oid": sha, "statusCheckRollup": {"contexts": {
+                "pageInfo": {"hasNextPage": more_contexts}, "nodes": list(contexts)}}}}]}}
+
+
+def check_run(name, conclusion="SUCCESS", required=True, app="ci", app_id=1, status="COMPLETED"):
+    return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
+            "isRequired": required, "checkSuite": {"app": {"slug": app, "databaseId": app_id}}}
+
+
+def status(context, state="SUCCESS", required=True, creator="ci-bot"):
+    return {"__typename": "StatusContext", "context": context, "state": state, "isRequired": required,
+            "creator": {"login": creator}}
+
+
+def merge_rules(fake, pull=None, rules=(), classic=None, protected=None, branch="main"):
+    """Serve the rule sources for `branch` and the GraphQL PR (a dict, or a callable returning one)."""
+    fake.routes[("GET", f"{R}/rules/branches/{branch}")] = list(rules)
+    is_protected = classic is not None if protected is None else protected
+    fake.routes[("GET", f"{R}/branches/{branch}")] = {"name": branch, "protected": is_protected}
+    if classic is not None:
+        fake.routes[("GET", f"{R}/branches/{branch}/protection")] = classic
+    elif is_protected:
+        fake.routes[("GET", f"{R}/branches/{branch}/protection")] = lambda q, d: (404, {"message": "Branch not protected"})
+    get = pull if callable(pull) else (lambda: pull if pull is not None else gql_pr())
+    fake.routes[("POST", "/graphql")] = lambda q, d: (200, {"data": {"repository": {"pullRequest": get()}}})
+
+
 @pytest.fixture
 def gh():
     fake = FakeGitHub()
@@ -90,7 +124,8 @@ def test_closed_and_merged_states(gh, state, merged, expected):
 
 @pytest.mark.parametrize("merge_state,blocked", [
     ("clean", False), ("unstable", False), ("has_hooks", False),
-    ("blocked", True), ("behind", True), ("dirty", True), ("draft", True), ("unknown", True),
+    ("blocked", False),  # left to merge_rule_blockers, which names the rule
+    ("behind", True), ("dirty", True), ("draft", True), ("unknown", True),
 ])
 def test_merge_state_blockers(gh, merge_state, blocked):
     fake, _, be = gh
@@ -265,6 +300,8 @@ def test_engine_plan_then_apply_on_github(repo, gh, tmp_path):
     fake.routes[("POST", f"{R}/issues/1/comments")] = post
     fake.routes[("GET", f"{R}/pulls/1/reviews")] = [{"user": {"login": "james"}, "state": "APPROVED", "commit_id": sha}]
     fake.routes[("GET", f"{R}/collaborators/james/permission")] = {"permission": "write", "role_name": "write"}
+    merge_rules(fake, gql_pr(sha=sha, decision="APPROVED"),
+                rules=[{"type": "pull_request", "ruleset_id": 1, "parameters": {"required_approving_review_count": 1}}])
 
     cfg = config.load(repo / "ferry.yaml")
     red = Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths, environ={})

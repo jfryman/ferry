@@ -116,6 +116,7 @@ def test_apply_happy_path(env):
     (lambda vcs, clock: setattr(vcs.crs[1], "discussions_resolved", False), "discussions"),
     (lambda vcs, clock: setattr(vcs.crs[1], "blocked_reasons", ["need_rebase"]), "need_rebase"),
     (lambda vcs, clock: setattr(vcs.crs[1], "state", "closed"), "MR is closed"),
+    (lambda vcs, clock: vcs.rule_blockers.__setitem__(1, ["GitHub requires check `lint`"]), "`lint`"),
     (lambda vcs, clock: setattr(clock, "t", NOW + 25 * 3600), "old"),
     (lambda vcs, clock: vcs.files.__setitem__(1, ["inventories/homelab/host_vars/ntp-1.yml"]), "scope differs"),
 ])

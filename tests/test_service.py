@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 from fakes import FakeRunner, ev_result, ev_stats, stats
-from test_github import FakeGitHub, R, pr as pr_json
+from test_github import FakeGitHub, R, gql_pr, merge_rules, pr as pr_json
 
 from ferry.locks import SQLiteLocks
 from ferry.service import Job, Service, Settings, make_handler, verify_signature
@@ -70,6 +70,12 @@ class World:
         g.routes[("GET", f"{R}/issues/1/comments")] = lambda q, d: (200, self.comments)
         g.routes[("POST", f"{R}/issues/1/comments")] = self._post
         g.routes[("GET", f"{R}/pulls/1/reviews")] = lambda q, d: (200, self.reviews)
+        # A ruleset needs one approval; GitHub's review decision follows the reviews.
+        merge_rules(g, lambda: gql_pr(sha=self.sha, decision="APPROVED" if any(
+                        r["state"] == "APPROVED" and r["commit_id"] == self.sha for r in self.reviews)
+                        else "REVIEW_REQUIRED", merge_state="CLEAN"),
+                    rules=[{"type": "pull_request", "ruleset_id": 1,
+                            "parameters": {"required_approving_review_count": 1}}])
         for u in ("james", "pip", "mallory"):
             g.routes[("GET", f"{R}/collaborators/{u}/permission")] = (
                 lambda q, d, u=u: (200, {"role_name": "write" if u in self.writers else "read"}))
