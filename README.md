@@ -483,3 +483,84 @@ Release: see `lode/practices.md`. In short: bump the version in `pyproject.toml`
 `ferry.__version__`, add a `CHANGELOG.md` entry, merge, then push an annotated tag `vX.Y.Z`. GitHub
 Actions builds and pushes the image, and you create a GitHub release from the changelog entry.
 Project notes for agents live in `lode/`.
+
+## Operator runs (`ferry run`)
+
+Run a **trusted** playbook on your machine, through the running service's inventory lock,
+SSH signer and audit, without a webhook:
+
+```sh
+ferry run -i staging --service https://ferry.example.com site.yml          # --check --diff
+ferry run -i staging --service https://ferry.example.com --apply site.yml  # explicit write
+```
+
+The tree must be clean (including untracked files) and HEAD reachable from an origin branch after
+fetching. The CLI generates a throwaway ed25519 key, renews its service lease, uses a private SSH
+ControlPath, and finishes and deletes its credential directory on exit, SIGINT or SIGTERM.
+SIGKILL cannot run cleanup: the service expires its lease. A failed renewal terminates Ansible.
+Use HTTPS and pin SSH host keys; `--insecure-http` disables both checks **only for the throwaway lab**.
+
+The API is off unless **both** `FERRY_RUN_OIDC_ISSUER` and `FERRY_RUN_OIDC_AUDIENCE` are configured.
+The issuer is OpenBao's identity issuer (for example `https://bao.example.com/v1/identity/oidc`),
+not the login/auth endpoint. Ferry reads `<issuer>/.well-known/keys` and accepts **RS256 only**;
+configure the OpenBao identity key accordingly. Signature, issuer, audience and expiry are checked
+on every call. A person has no SSH signing permission and sends ferry an **identity JWT**, never
+an OpenBao API token. No webhook signature authorizes these API routes, or vice versa.
+
+Authorization requires both:
+- `FERRY_RUN_ALLOWED_SUBJECTS` (comma-separated entity IDs) or `FERRY_RUN_ALLOWED_GROUPS`
+  (comma-separated strings in a signed `groups` claim); and
+- an explicit matching subject or group in default-branch `ferry.yaml` for the inventory:
+
+```yaml
+inventories:
+  - name: staging
+    path: inventories/staging
+    apply:
+      run_allowed: [operators] # both check and apply; [] refuses both
+apply:
+  run_allowed: [] # default for inventories without an override
+```
+
+`POST /api/runs` accepts `{inventory, limit, mode: check|apply, sha, public_key}` and returns only
+that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
+`POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Finish accepts
+`{ok, counts, changed_hosts}`; results are operator-reported, not independent execution attestation.
+Apply kill switches also refuse operator applies. A PR lock refuses a run; a run lock refuses a PR.
+`FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
+actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
+`/jobs` records `trigger: cli`, subject, run ID, inventory, limit, mode, full SHA, result and the
+certificate **serial**. The role still owns `key_id_format`: match sshd's serial to the audit.
+`ferry_jobs_by_trigger_total{trigger="cli",action="plan|apply",result="..."}` counts finishes.
+Keep `/jobs` private: it contains operator identities and inventory names.
+
+### Admin-token demo login (Google OIDC later)
+
+`deploy/local/up.sh` provisions the complete demo. An admin configures an RS256 identity key,
+identity role `ferry` with audience `ferry`, an entity, an entity alias on the token auth mount,
+and a token role `ferry-operator` with `allowed_entity_aliases` restricted to that alias. Its policy
+can **only** read `identity/oidc/token/ferry`, not sign SSH certificates or read vault secrets.
+Then, using the admin credential **outside the playbook's environment**:
+
+```sh
+bao token create -role=ferry-operator -entity-alias=demo
+# Log in with the resulting operator token, not the admin token:
+bao login
+bao read -field=token identity/oidc/token/ferry
+ferry run -i staging --service https://ferry.example.com site.yml
+```
+
+The CLI defaults to `bao read -field=token identity/oidc/token/ferry` (this endpoint is GET, not
+`bao write`). Override with `--token-command` or `FERRY_RUN_TOKEN_COMMAND`; arguments are parsed
+without a shell. Google OIDC can later authenticate the same entity; the service is unchanged.
+
+**Security limits:** a stolen identity JWT can request credentials for allowed inventories until it
+expires, and renew or finish that subject's runs. A run ID alone grants nothing. Certificates cannot
+be revoked by finishing or missing a lease: an abandoned client may retain host access until the
+certificate expires, and existing SSH sessions may survive it. Lease expiry frees serialization,
+not host access. Keep certificate TTLs short, restrict principals and monitor sshd serials.
+The playbook runs as your local user: it can read its own key/password **and any files accessible
+to your user**, including login-token files. A minimal child environment and temporary HOME are
+hygiene, not a sandbox. Use a dedicated operator account/container for untrusted code; the lab does.
+The client SHA/limit/mode and result are audit assertions by an authorized operator, not proof that
+an arbitrary client ran those exact bytes. Protect operator identities as privileged credentials.

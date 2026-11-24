@@ -2,6 +2,15 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## Unreleased
+
+### Added
+- `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,
+  short renewable leases, OpenBao identity JWT verification and per-run SSH/vault credentials.
+- Default-branch per-inventory operator authorization, kill switches, certificate-serial audit
+  and fixed-label metrics by trigger. The API is disabled unless issuer and audience are set.
+- Admin-token identity demo and local operator check/apply, contention, expiry and denial scenarios.
+
 ## [0.3.0] - 2026-11-24
 
 Security fixes and Atlantis-parity features for `ferry serve`, from the 0.2.1 review (#21–#30,
