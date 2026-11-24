@@ -2,7 +2,7 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
-## Unreleased
+## [0.4.1] - 2026-11-24
 
 ### Added
 - **A separate signing role for CLI certificates** (#69): `FERRY_RUN_SSH_ROLE` and
@@ -203,6 +203,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[0.4.1]: https://github.com/jfryman/ferry/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jfryman/ferry/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jfryman/ferry/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jfryman/ferry/compare/v0.2.0...v0.2.1
