@@ -39,7 +39,7 @@ class FakeAppAPI:
         path = url.split("api.github.com", 1)[1]
         self.calls.append((method, path))
         if path == "/app":
-            return 200, b'{"slug": "ferry-atomic"}'
+            return 200, b'{"slug": "ferry-example"}'
         if path == "/repos/acme/ansible/installation":
             return 200, b'{"id": 42}'
         if method == "POST" and path == "/app/installations/42/access_tokens":
@@ -53,7 +53,7 @@ def test_app_lookups(key):
     _, pem = key
     api = FakeAppAPI()
     app = GitHubApp(1, pem, transport=api)
-    assert app.bot_login() == "ferry-atomic[bot]"
+    assert app.bot_login() == "ferry-example[bot]"
     assert app.installation_id("acme/ansible") == 42
 
 
