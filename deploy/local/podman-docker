@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# `docker` for the lab under rootless podman. Everything passes straight through to podman, except
+# `run`, which gets a user namespace so bind-mounted lab files keep sensible owners:
+#   run -u "$(id -u):$(id -g)" ...   --userns=keep-id        (you, inside and out)
+#   run --name ferry-lab-ferry ...   --userns=keep-id:uid=10001,gid=10001
+#                                    (the image's ferry user is you on the host, so the state and
+#                                    work dirs it writes stay yours)
+# Without keep-id, rootless podman maps container uids onto your subuid range: the service can't
+# write the lab dir and you can't delete what it wrote. The lab scripts pick this up by themselves
+# (deploy/local/runtime.sh) when there's no docker; LAB_RUNTIME=podman forces it.
+#
+# With CONTAINER_HOST set (e.g. unix://$XDG_RUNTIME_DIR/podman/podman.sock from a long-running
+# `podman system service --time=0`), every command goes through that service (`podman --remote`),
+# so the containers don't belong to the shell that ran up.sh and outlive it.
+set -euo pipefail
+PODMAN=(podman)
+[ -n "${CONTAINER_HOST:-}" ] && PODMAN=(podman --remote)
+KEEPID_AS=${LAB_KEEPID_AS:-ferry-lab-ferry=10001}
+
+[ "${1:-}" = run ] || exec "${PODMAN[@]}" "$@"
+shift
+me="$(id -u):$(id -g)" userns="" prev=""
+# Look for `-u <you>` and `--name <container>` anywhere in the options (the lab never passes
+# either to a container's own command), then prepend the user namespace.
+for a in "$@"; do
+  case "$prev" in
+    -u|--user) [ "$a" = "$me" ] && userns="--userns=keep-id" ;;
+    --name) for pair in $KEEPID_AS; do
+              [ "${pair%%=*}" = "$a" ] && userns="--userns=keep-id:uid=${pair#*=},gid=${pair#*=}"
+            done ;;
+  esac
+  case "$a" in --userns|--userns=*) exec "${PODMAN[@]}" run "$@" ;; esac  # the caller's own choice wins
+  prev=$a
+done
+exec "${PODMAN[@]}" run ${userns:+"$userns"} "$@"

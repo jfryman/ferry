@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stand up the full ferry loop locally, in Docker: OpenBao (dev) with Nomad-style JWT auth, the SSH
 # user CA and the vault password; a fake GitHub API; a git remote with one PR; an sshd host that
-# trusts the CA; and the ferry service. Needs: docker, bash, git, curl, openssl.
+# trusts the CA; and the ferry service. Needs: docker or rootless podman, bash, git, curl, openssl.
 #
 #   deploy/local/up.sh          # build and start (re-run to rebuild from scratch)
 #   deploy/local/lab.sh open    # deliver a signed "PR opened" webhook, then see lab.sh help
@@ -13,10 +13,12 @@ ROOT=$(cd "$HERE/../.." && pwd)
 LAB=${LAB_DIR:-/tmp/ferry-lab}
 NET=ferry-lab
 BAO_IMAGE=${BAO_IMAGE:-openbao/openbao:2.7.2}
+. "$HERE/runtime.sh"
 say() { printf '\n==> %s\n' "$*"; }
 
 "$HERE/down.sh" >/dev/null 2>&1 || true
-rm -rf "$LAB" && mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src,work,run}
+wipe "$LAB"
+mkdir -p "$LAB"/{ca,jwt,secrets,remote,state,src,work,run}
 chmod 777 "$LAB"/{ca,jwt,secrets,state,work,run}
 
 say "Building images (ferry:lab, ferry-target:lab)"
@@ -145,7 +147,7 @@ curl -sf localhost:18080/healthz >/dev/null || { docker logs ferry-lab-ferry; ex
 
 say "Up. Lab dir: $LAB"
 cat <<TXT
-  ferry       http://localhost:18080  (POST /webhook, GET /healthz)
+  ferry       http://localhost:18080  (POST /webhook, GET /healthz /metrics /jobs)
   fake GitHub http://localhost:18999/_state
   OpenBao     http://localhost:18200  (token: lab)
   Walk the loop:  $HERE/lab.sh open | comments | apply | approve | apply | motd | close

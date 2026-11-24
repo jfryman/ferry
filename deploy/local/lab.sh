@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Drive the lab like GitHub would: signed webhooks, approvals, pushes. See up.sh.
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/runtime.sh"
 LAB=${LAB_DIR:-/tmp/ferry-lab}
 SECRET=$(cat "$LAB/secrets/webhook-secret")
 REPO=acme/ansible
@@ -10,6 +11,7 @@ deliver() {  # deliver EVENT BODY [DELIVERY-ID]; keeps the last one in $LAB/last
   local sig
   sig="sha256=$(printf '%s' "$2" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)"
   printf '%s\n%s\n' "$1" "$2" > "$LAB/last-delivery"
+  BEFORE=$(curl -s localhost:18080/healthz)  # for wait_idle: a fast job can finish before it looks
   curl -s -X POST localhost:18080/webhook -H "X-GitHub-Event: $1" -H "X-GitHub-Delivery: ${3:-lab-$(date +%s%N)}" \
     -H "X-Hub-Signature-256: $sig" -H "Content-Type: application/json" --data-binary "$2"
 }
@@ -20,7 +22,7 @@ comment() {  # comment USER BODY
   deliver issue_comment "{\"action\":\"created\",\"repository\":{\"full_name\":\"$REPO\"},\"issue\":{\"number\":1,\"pull_request\":{}},\"comment\":{\"id\":$(date +%s%N),\"user\":{\"login\":\"$1\"},\"body\":\"$2\",\"created_at\":\"$(now)\",\"updated_at\":\"$(now)\"}}"
 }
 wait_idle() {  # until the worker has nothing queued and the last job changed
-  local before; before=$(curl -s localhost:18080/healthz)
+  local before=${BEFORE:-$(curl -s localhost:18080/healthz)}
   for _ in $(seq 1 60); do
     sleep 1; now=$(curl -s localhost:18080/healthz)
     [ "$now" != "$before" ] && echo "$now" | grep -q '"queued": 0' && { echo "$now"; return; }
@@ -29,7 +31,8 @@ wait_idle() {  # until the worker has nothing queued and the last job changed
 }
 
 case "${1:-help}" in
-  open)     pr_event opened "${2:-pip}"; echo; [ "${2:-pip}" = pip ] && wait_idle ;;
+  open)     curl -s -X POST localhost:18999/_pr_state -d '{"state":"open"}' >/dev/null
+            pr_event opened "${2:-pip}"; echo; [ "${2:-pip}" = pip ] && wait_idle ;;
   plan)     comment "${2:-james}" "/ferry plan"; echo; wait_idle ;;
   apply)    comment "${2:-james}" "/ferry apply"; echo; wait_idle ;;
   approve)  curl -s -X POST localhost:18999/_approve -d "{\"user\":\"${2:-james}\"}"; echo ;;
@@ -42,7 +45,8 @@ case "${1:-help}" in
             git -C "$LAB/remote/acme/ansible.git" update-ref refs/pull/1/head "$(git -C "$LAB/src" rev-parse HEAD)"
             git -C "$LAB/src" rev-parse HEAD > "$LAB/pr_head"
             pr_event synchronize pip; echo; wait_idle ;;
-  close)    pr_event closed pip; echo; wait_idle ;;
+  close)    curl -s -X POST localhost:18999/_pr_state -d '{"state":"closed"}' >/dev/null
+            pr_event closed pip; echo; wait_idle ;;
   replay)   # re-send the last delivery's exact signed body under a new delivery id: expect a duplicate
             { read -r ev; body=$(cat); } < "$LAB/last-delivery"; deliver "$ev" "$body" "replay-$(date +%s%N)"; echo ;;
   evil)     # a hostile PR (passes the static policy): during the plan, on the controller, it tries the
