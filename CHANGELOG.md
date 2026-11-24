@@ -2,6 +2,21 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## Unreleased
+
+### Added
+- **A separate signing role for CLI certificates** (#69): `FERRY_RUN_SSH_ROLE` and
+  `FERRY_RUN_SSH_PRINCIPAL` (default: the service's own). A service role pinned to the service's
+  network refuses CLI certificates used from operator machines; a second role carries the operator
+  networks (office LAN, VPN, tailnet) as OpenBao configuration. See `docs/run.md`.
+
+### Fixed
+- `ferry run` shows the service's refusal reason, for example `service refused request (HTTP 409):
+  inventory locked` (#67). Only a short JSON `error` from the service is shown, with control
+  characters removed; any other body (a proxy's page) still shows only the status.
+- A failed `ssh-keygen` (for example a uid with no passwd entry in a container) is a clean
+  `ferry run` error, not a traceback (#68).
+
 ## [0.4.0] - 2026-11-24
 
 `ferry run`: operators run Ansible from their own machine, **through the running service**. The

@@ -600,3 +600,17 @@ def test_unverified_identity_leaves_no_job(api, caplog):
     assert api.request(token='not.a.token')[0] == 401
     assert api.svc.state.jobs() == []
     assert any('invalid identity token' in r.getMessage() for r in caplog.records)
+
+
+def test_cli_certificate_uses_service_role_by_default(api):
+    assert api.request()[0] == 201
+    kw = api.bao.sign_ssh_key.call_args.kwargs
+    assert kw['role'] is None and kw['principal'] is None
+
+
+def test_cli_certificate_uses_cli_role_when_configured(api):
+    api.svc.settings.run_ssh_role = 'ferry-run'
+    api.svc.settings.run_ssh_principal = 'ferry-operator'
+    assert api.request()[0] == 201
+    kw = api.bao.sign_ssh_key.call_args.kwargs
+    assert kw['role'] == 'ferry-run' and kw['principal'] == 'ferry-operator'

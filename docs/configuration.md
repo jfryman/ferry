@@ -215,6 +215,8 @@ Per-job credentials are enabled by setting `FERRY_OPENBAO_ADDR`.
 | `FERRY_RUN_LEASE_SECONDS` | `300` | Lease length |
 | `FERRY_RUN_CERT_TTL` | `15m` | Certificate TTL for CLI runs. Accepts `900`, `900s`, `15m`, `1h`. |
 | `FERRY_RUN_NAME_CLAIM` | `name` | The signed claim used as a display name |
+| `FERRY_RUN_SSH_ROLE` | the service's role | SSH signing role for CLI certificates ([run.md](run.md)) |
+| `FERRY_RUN_SSH_PRINCIPAL` | the service's principal | Principal requested for CLI certificates |
 
 ## `ferry executor`
 

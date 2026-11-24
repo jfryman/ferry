@@ -109,6 +109,37 @@ Other settings:
 | `FERRY_RUN_LEASE_SECONDS` | `300` | Lease length. Renewal never extends past the certificate's expiry. |
 | `FERRY_RUN_CERT_TTL` | `15m` | The TTL requested for CLI certificates. Also the longest a run can last. |
 | `FERRY_RUN_NAME_CLAIM` | `name` | The signed claim used as a display name |
+| `FERRY_RUN_SSH_ROLE` | the service's role | The SSH signing role for CLI certificates, on the same mount |
+| `FERRY_RUN_SSH_PRINCIPAL` | the service's principal | The principal requested for CLI certificates |
+
+### A separate signing role for CLI certificates
+
+The service's own role is built for where the service runs. Most deployments pin its
+`source-address` to the service's network, so a CLI certificate signed with it is refused by sshd
+when used from an operator's machine ("valid certificate but not from a permitted source address").
+Set `FERRY_RUN_SSH_ROLE` to a second role meant for operators, and keep the service's role as narrow
+as it was. The operator networks are configuration in OpenBao, not in ferry:
+
+```hcl
+resource "vault_ssh_secret_backend_role" "ferry_run" {
+  backend                 = "ssh"
+  name                    = "ferry-run"
+  key_type                = "ca"
+  allow_user_certificates = true
+  allowed_users           = "ferry"   # the principal hosts already trust, or a new one
+  default_user            = "ferry"
+  ttl                     = "900"     # matches FERRY_RUN_CERT_TTL
+  max_ttl                 = "1200"
+  default_extensions      = { "permit-pty" = "" }
+  # Where operators run from (office LAN, VPN pool, tailnet), not the service's network.
+  default_critical_options = { "source-address" = "192.0.2.0/24,198.51.100.0/24" }
+}
+```
+
+The service's OpenBao policy needs `update` on `ssh/sign/ferry-run` too, with the same
+`allowed_parameters` limits as on its own role. Operators never get signing rights on either role:
+only the service signs, after its checks and the lock. A separate principal (for example
+`ferry-operator`) lets hosts trust CLI runs separately from webhook jobs.
 
 ## Identity
 

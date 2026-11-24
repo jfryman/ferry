@@ -294,7 +294,11 @@ class Runs:
             # CLI certificates leave the service: ask for a short TTL (#53), and refuse one that
             # came back longer than asked (a role default or misconfiguration), 60 s for skew.
             ttl = svc.settings.run_cert_ttl
-            cert = svc.bao.sign_ssh_key(token, pub, ttl=ttl)
+            # CLI certificates are used from operator machines, not from where the service runs:
+            # sign with the CLI role (#69) when one is configured, so its source networks, TTL and
+            # principal are set in OpenBao separately from the service's role.
+            cert = svc.bao.sign_ssh_key(token, pub, ttl=ttl, role=svc.settings.run_ssh_role,
+                                        principal=svc.settings.run_ssh_principal)
             serial, expires = certificate_details(cert)
             if expires <= svc.clock():
                 raise ValueError('certificate expired')
