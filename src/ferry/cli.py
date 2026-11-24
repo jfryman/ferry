@@ -7,6 +7,10 @@
   ferry scope   FILE...                  print the --limit a set of changed files maps to
   ferry policy                           run the static policy checks
   ferry serve                            webhook service, GitHub App or GitLab (see `ferry serve --help`)
+  ferry executor                         run serve's playbooks as a separate, unprivileged user
+  ferry switch  [apply|autoplan] [on|off]  switch applies or automatic plans off/on on a running service
+  ferry run     PLAYBOOK -i INV [--apply] break-glass local run with a service-owned lock and
+                                         per-run credentials (see docs/run.md)
 
 GitLab context comes from the standard CI variables (CI_API_V4_URL, CI_PROJECT_ID,
 CI_MERGE_REQUEST_IID, CI_COMMIT_SHA, GITLAB_USER_LOGIN, CI_JOB_URL) plus FERRY_GITLAB_TOKEN.

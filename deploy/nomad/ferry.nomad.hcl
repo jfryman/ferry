@@ -42,7 +42,7 @@ job "ferry" {
       driver = "docker"
 
       config {
-        image = "ghcr.io/jfryman/ferry:v0.2.0"
+        image = "ghcr.io/jfryman/ferry:v0.4.0"
         ports = ["http"]
       }
       user = "10001"
@@ -109,7 +109,7 @@ job "ferry" {
       }
 
       config {
-        image   = "ghcr.io/jfryman/ferry:v0.2.0"
+        image   = "ghcr.io/jfryman/ferry:v0.4.0"
         command = "executor"
       }
 
