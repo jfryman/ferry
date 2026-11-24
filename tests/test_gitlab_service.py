@@ -499,3 +499,46 @@ def test_a_reopened_mr_keeps_its_locks(world):
     [unlock] = world.drain()
     assert unlock["released"] == [] and "open again" in unlock["skipped"]
     assert world.locks.get("homelab").holder == 1
+
+
+# ---- metrics and job history (#16) ---------------------------------------------------------------
+
+
+def test_metrics_count_gitlab_rejects_and_jobs(world):
+    import socket
+    from ferry.service import BoundedHTTPServer
+    httpd = BoundedHTTPServer(("127.0.0.1", 0), make_handler(world.svc))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def post(token, payload, key):
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(f"{base}/webhook", data=body, method="POST", headers={
+            "X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": token, "Idempotency-Key": key})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code
+    try:
+        assert post("nope", world.note_event("/ferry plan"), "k1") == 401
+        ev = world.note_event("/ferry plan")
+        assert "plan queued" in post(SECRET.decode(), ev, "k2")
+        assert "duplicate" in post(SECRET.decode(), ev, "k3")
+        assert "stale" in post(SECRET.decode(), world.note_event("/ferry plan", at="2027-01-15 07:00:00 UTC"), "k4")
+        assert "no Developer access" in post(SECRET.decode(), world.note_event("/ferry plan", user="mallory"), "k5")
+        world.drain()
+        with urllib.request.urlopen(f"{base}/metrics") as resp:
+            text = resp.read().decode()
+        for reason in ("bad_auth", "duplicate", "stale", "no_access"):
+            assert f'ferry_webhook_rejected_total{{reason="{reason}"}} 1' in text, reason
+        assert 'ferry_jobs_total{action="plan",result="ok"} 1' in text
+        for leak in ("alice", "mallory", world.sha[:7], SECRET.decode(), "acme"):
+            assert leak not in text, leak
+        with urllib.request.urlopen(f"{base}/jobs") as resp:
+            [job] = json.loads(resp.read())["jobs"]
+        assert (job["action"], job["pr"], job["user"], job["result"]) == ("plan", 1, "alice", "ok")
+        assert not {"error", "reasons"} & set(job)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

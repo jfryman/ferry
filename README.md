@@ -225,6 +225,39 @@ time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (o
   (`ci_still_running`, `ci_must_pass`) also refuses in the service, as GitHub's required checks do;
   the CI driver ignores those two because its apply job is part of that pipeline.
 
+## Observability (`ferry serve`)
+
+Both backends serve, on the same port as the webhook:
+
+- `GET /metrics`: Prometheus text format.
+
+  | Metric | Type | Labels |
+  |---|---|---|
+  | `ferry_jobs_total` | counter | `action` (plan, apply, unlock, drift), `result` (ok, failed, refused, skipped, error) |
+  | `ferry_job_duration_seconds` | histogram | `action` |
+  | `ferry_jobs_queued_total` | counter | `action` |
+  | `ferry_webhook_rejected_total` | counter | `reason` (bad_auth, duplicate, stale, future, undated, bad_json, foreign_repo, no_access, head_moved, queue_full, too_large, bad_request) |
+  | `ferry_last_job_timestamp_seconds` | gauge | `action` |
+  | `ferry_queue_depth`, `ferry_locks_held` | gauge | |
+  | `ferry_build_info` | gauge | `version` |
+
+  `refused` means a gate said no and nothing ran. `failed` means ansible ran and wasn't clean.
+  `skipped` means the PR moved on. `error` means ferry couldn't finish (the service log says why).
+- `GET /jobs[?limit=N]`: the newest finished jobs (up to 200) as JSON, read-only, kept in the
+  state file (`FERRY_JOB_HISTORY`, default 200). Each entry has the action, PR, short SHA, user,
+  inventory, result, start time and duration.
+- `GET /healthz`: the queue depth and the last job.
+
+Every label value comes from a fixed set. Usernames, commits, branches, error text, URLs and
+credentials never appear in `/metrics`. `/jobs` holds no error text or refusal reasons (those go
+on the PR and in the log). The three endpoints are unauthenticated: expose only `/webhook`
+publicly, and scrape the rest from inside the cluster.
+
+Example alerts: `increase(ferry_jobs_total{result="error"}[1h]) > 0`,
+`ferry_queue_depth > 5` for 15m, and
+`increase(ferry_webhook_rejected_total{reason=~"bad_auth|stale"}[1h]) > 0` (someone is sending
+forged or replayed deliveries).
+
 ## Container image
 
 `ghcr.io/jfryman/ferry`, built by GitHub Actions for **linux/amd64** and **linux/arm64**, with SBOM
