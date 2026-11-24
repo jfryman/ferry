@@ -62,8 +62,8 @@ webhook jobs (#50, #52). It's a break-glass path: no PR, review or approval. The
   a bind mount).
 
 ### Upgrading
-- Nothing to do if you don't use `ferry run`: the API stays off. To enable it, see the README's
-  "Operator runs" section: an OpenBao identity token role, the two `FERRY_RUN_OIDC_*` settings, an
+- Nothing to do if you don't use `ferry run`: the API stays off. To enable it, see
+  [docs/run.md](docs/run.md): an OpenBao identity token role, the two `FERRY_RUN_OIDC_*` settings, an
   allow-list, `apply.run_allowed` per inventory, and an ingress route for `POST /api/runs` and its
   lease/finish routes only. Never route `/jobs` or `/metrics` publicly.
 

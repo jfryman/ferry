@@ -45,22 +45,24 @@ evil`/`leakcheck` ("0 of 3"), and `lab.sh replay` ("duplicate delivery").
 
 ```mermaid
 flowchart LR
-  subgraph host [your machine]
-    LAB[lab.sh: signed webhooks,\napprovals, pushes]
-  end
-  subgraph net [docker network ferry-lab]
-    GH[ferry-lab-github\nfake api.github.com\nfakegh.py]
-    F[ferry-lab-ferry\nferry serve]
-    B[ferry-lab-bao\nOpenBao 2.7.2 dev]
-    T[ferry-lab-target\nsshd trusting the CA]
-  end
-  R[(git remote\n/tmp/ferry-lab/remote)]
-  LAB -->|POST /webhook :18080| F
-  LAB -->|/_approve| GH
-  F -->|App JWT, installation token,\ncomments| GH
-  F -->|fetch main + refs/pull/1/head| R
-  F -->|jwt-nomad login, sign key,\nvault password| B
-  F -->|ansible over SSH as root,\n30-min certificate| T
+    subgraph host ["your machine"]
+        LAB["lab.sh: signed webhooks,<br/>approvals, pushes"]
+    end
+    subgraph net ["docker network ferry-lab"]
+        GH["ferry-lab-github<br/>fake api.github.com<br/>fakegh.py"]
+        F["ferry-lab-ferry<br/>ferry serve"]
+        X["ferry-lab-executor<br/>ferry executor"]
+        B["ferry-lab-bao<br/>OpenBao 2.7.2 dev"]
+        T["ferry-lab-target<br/>sshd trusting the CA"]
+    end
+    R[("git remote<br/>/tmp/ferry-lab/remote")]
+    LAB -->|"POST /webhook on port 18080"| F
+    LAB -->|"/_approve"| GH
+    F -->|"App JWT, installation token,<br/>comments"| GH
+    F -->|"fetch main and refs/pull/1/head"| R
+    F -->|"jwt-nomad login, sign key,<br/>vault password"| B
+    F -->|"job over a Unix socket"| X
+    X -->|"ansible over SSH as root,<br/>30-minute certificate"| T
 ```
 
 | Lab piece | What it stands in for in production |
@@ -109,7 +111,7 @@ docker logs ferry-lab-target 2>&1 | grep Accepted | sed -E 's/.*serial ([0-9]+).
 
 ## A hostile plan can't read the service's secrets
 
-The playbooks run in a separate container, `ferry-lab-executor`: user `ferry-run`, none of the service's secrets mounted, the work dir read-only. See "Playbooks run apart from the service" in the top-level README.
+The playbooks run in a separate container, `ferry-lab-executor`: user `ferry-run`, none of the service's secrets mounted, the work dir read-only. See [The executor](../../docs/serve.md#the-executor).
 
 - **`lab.sh evil`**: pushes a change that gets past the static policy. It uses file lookups plus a lookup plugin shipped in the repo, which runs on the controller during the *plan*. The plugin tries the App key, the webhook secret, the workload JWT and the lock file, dumps its environment and every `/proc/*/environ`, and copies everything to the target with the job's own certificate.
 - **`lab.sh leakcheck`**: shows what it got, without printing any secret. Every service secret path is `DENIED (FileNotFoundError)`, the playbook ran as `uid=10002`, there's no `VAULT_TOKEN` and no service variable in its environment, and `service secrets found ...: 0 of 3`. It can read the job's own key and vault password. That's inherent: the playbook needs them. Checked Nov 24.
