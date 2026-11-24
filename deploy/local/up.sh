@@ -137,6 +137,7 @@ docker run -d --name ferry-lab-ferry --network "$NET" -p 18080:8080 -v "$LAB/git
   -v "$LAB/work:/var/lib/ferry/work" -v "$LAB/run:/run/ferry" -e FERRY_EXECUTOR_SOCKET=/run/ferry/executor.sock \
   -e FERRY_GITHUB_REPO=acme/ansible -e FERRY_GITHUB_APP_ID=1 -e FERRY_GITHUB_APP_KEY_FILE=/secrets/app.pem \
   -e FERRY_WEBHOOK_SECRET_FILE=/secrets/webhook-secret \
+  -e FERRY_COMMIT_STATUS=1 \
   -e GITHUB_API_URL=http://ferry-lab-github:8080 -e FERRY_GITHUB_GIT_URL=file:///remote \
   -e FERRY_SSH_USER=root -e ANSIBLE_HOST_KEY_CHECKING=False \
   -e FERRY_OPENBAO_ADDR=http://ferry-lab-bao:8200 -e FERRY_OPENBAO_JWT_FILE=/jwt/nomad_openbao.jwt \

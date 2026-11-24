@@ -63,9 +63,9 @@ def check_run(name, conclusion="SUCCESS", required=True, app="ci", app_id=1, sta
             "isRequired": required, "checkSuite": {"app": {"slug": app, "databaseId": app_id}}}
 
 
-def status(context, state="SUCCESS", required=True, creator="ci-bot"):
+def status(context, state="SUCCESS", required=True, creator="ci-bot", creator_type="User"):
     return {"__typename": "StatusContext", "context": context, "state": state, "isRequired": required,
-            "creator": {"login": creator}}
+            "creator": {"__typename": creator_type, "login": creator}}
 
 
 def merge_rules(fake, pull=None, rules=(), classic=None, protected=None, branch="main"):
@@ -431,5 +431,22 @@ def test_ferrys_own_required_status_does_not_block_its_apply():
     assert be.merge_rule_blockers(cr) == []
     # Someone else's status with ferry's name is not ferry's.
     contexts[0] = status("ferry/apply: homelab", state="PENDING", creator="mallory")
+    merge_rules(fake, gql_pr(sha="a" * 40, contexts=contexts, merge_state="BLOCKED"), rules=rules)
+    assert be.merge_rule_blockers(cr) != []
+
+
+def test_ferrys_own_status_as_graphql_reports_it_does_not_block_its_apply():
+    """GraphQL gives an App's status creator as its slug with __typename Bot (no "[bot]")."""
+    from ferry.vcs.base import ChangeRequest
+    fake = FakeGitHub()
+    be = GitHubBackend(GitHubClient("tok", transport=fake), "acme/ansible", bot_login="ferry-acme[bot]")
+    rules = [{"type": "required_status_checks", "ruleset_id": 2,
+              "parameters": {"required_status_checks": [{"context": "ferry/apply: homelab"}]}}]
+    cr = ChangeRequest(1, "a" * 40, "f", "main", "pip", "opened")
+    contexts = [status("ferry/apply: homelab", state="PENDING", creator="ferry-acme", creator_type="Bot")]
+    merge_rules(fake, gql_pr(sha="a" * 40, contexts=contexts, merge_state="BLOCKED"), rules=rules)
+    assert be.merge_rule_blockers(cr) == []
+    # A user who registered the App's slug as a login is not the App.
+    contexts[0] = status("ferry/apply: homelab", state="PENDING", creator="ferry-acme", creator_type="User")
     merge_rules(fake, gql_pr(sha="a" * 40, contexts=contexts, merge_state="BLOCKED"), rules=rules)
     assert be.merge_rule_blockers(cr) != []
