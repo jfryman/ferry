@@ -116,6 +116,7 @@ def test_apply_happy_path(env):
     (lambda vcs, clock: setattr(vcs.crs[1], "discussions_resolved", False), "discussions"),
     (lambda vcs, clock: setattr(vcs.crs[1], "blocked_reasons", ["need_rebase"]), "need_rebase"),
     (lambda vcs, clock: setattr(vcs.crs[1], "state", "closed"), "MR is closed"),
+    (lambda vcs, clock: vcs.rule_blockers.__setitem__(1, ["GitHub requires check `lint`"]), "`lint`"),
     (lambda vcs, clock: setattr(clock, "t", NOW + 25 * 3600), "old"),
     (lambda vcs, clock: vcs.files.__setitem__(1, ["inventories/homelab/host_vars/ntp-1.yml"]), "scope differs"),
 ])
@@ -139,6 +140,34 @@ def test_apply_refused_for_non_developer(env):
     out = eng.apply(1, SHA, "mallory")
     assert not out.ok and runner.requests == []
     assert any("Developer" in r for r in out.reasons)
+
+
+@pytest.mark.parametrize("approvals", [["mallory"], ["ferry-bot"], ["mallory", "ferry-bot"]])
+def test_apply_ignores_approvals_without_write_access(env, approvals):
+    # On a public GitHub repo anyone can leave an approving review; ferry's own account never counts.
+    cfg, vcs, locks, clock, make = env
+    planned(env, approvals=approvals)
+    eng, runner = make()
+    out = eng.apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert any("needs 1 approval" in r and "has 0" in r for r in out.reasons), out.reasons
+
+
+def test_apply_counts_approvals_with_write_access(env):
+    cfg, vcs, locks, clock, make = env
+    planned(env, approvals=["mallory", "james"])
+    eng, runner = make(clean_plan_run())
+    assert eng.apply(1, SHA, "james").ok
+
+
+def test_allowed_users_still_needs_write_access(env):
+    cfg, vcs, locks, clock, make = env
+    cfg.apply.allowed_users = ["james", "ex-member"]
+    planned(env)
+    eng, runner = make()
+    out = eng.apply(1, SHA, "ex-member")
+    assert not out.ok and runner.requests == []
+    assert any("may not apply" in r for r in out.reasons), out.reasons
 
 
 def test_apply_ignores_forged_plan_markers(env):

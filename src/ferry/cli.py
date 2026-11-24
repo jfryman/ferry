@@ -62,7 +62,8 @@ def build_engine(args, need_vcs: bool = True) -> Engine:
         if missing:
             sys.exit(f"ferry: missing {', '.join(missing)}")
         client = GitHubClient(token, api_url=args.api_url or _env("GITHUB_API_URL", GITHUB_API))
-        vcs = GitHubBackend(client, repo_name, bot_login=_env("FERRY_GITHUB_BOT"))
+        vcs = GitHubBackend(client, repo_name, bot_login=_env("FERRY_GITHUB_BOT"),
+                            own_checks=(_env("FERRY_GITHUB_OWN_CHECKS") or "").split(","))
         locks = SQLiteLocks(lock_db)
     elif need_vcs:
         api = args.api_url or _env("CI_API_V4_URL")
@@ -160,7 +161,9 @@ def build_service():
     app = GitHubApp(required["FERRY_GITHUB_APP_ID"], Path(required["FERRY_GITHUB_APP_KEY_FILE"]).read_bytes(), api)
     installation = int(_env("FERRY_GITHUB_INSTALLATION_ID") or app.installation_id(repo))
     tokens = InstallationTokens(app, installation)
-    vcs = GitHubBackend(GitHubClient(tokens, api_url=api), repo, bot_login=app.bot_login())
+    vcs = GitHubBackend(GitHubClient(tokens, api_url=api), repo, bot_login=app.bot_login(),
+                        own_checks=(_env("FERRY_GITHUB_OWN_CHECKS") or "").split(","),
+                        app_id=int(required["FERRY_GITHUB_APP_ID"]) if required["FERRY_GITHUB_APP_ID"].isdigit() else None)
     git_url = _env("FERRY_GITHUB_GIT_URL", "https://github.com").rstrip("/")
     bao = None
     if _env("FERRY_OPENBAO_ADDR"):

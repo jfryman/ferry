@@ -77,6 +77,7 @@ class Settings:
     ssh_user: str | None = None
     drift_interval_hours: float = 0.0  # 0: no scheduled drift runs
     drift_write_report: bool = True
+    max_queued_jobs: int = 50  # beyond this, webhooks get 503 (the code host retries or the user re-comments)
     job_timeout_minutes: float = 0.0  # 0: no limit. Keep it below the SSH certificate's TTL.
 
 
@@ -93,7 +94,7 @@ class Service:
     clock: Callable[[], float] = time.time
 
     def __post_init__(self):
-        self.jobs: "queue.Queue[Job | None]" = queue.Queue()
+        self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._seen_lock = threading.Lock()
         self.last_job: dict = {}
@@ -128,8 +129,7 @@ class Service:
         pr, action = p["pull_request"], p.get("action")
         number, sha, author = pr["number"], pr["head"]["sha"], pr["user"]["login"]
         if action == "closed":
-            self.jobs.put(Job("unlock", number, sha, author, delivery=delivery))
-            return 202, "unlock queued"
+            return self._enqueue(Job("unlock", number, sha, author, delivery=delivery))
         if action not in PLAN_ACTIONS:
             return 202, f"ignored pull_request.{action}"
         if pr.get("draft"):
@@ -139,8 +139,7 @@ class Service:
         if not self.vcs.can_apply(author):
             self._say_waiting(number, sha, author)
             return 202, "waiting for /ferry plan"
-        self.jobs.put(Job("plan", number, sha, author, delivery=delivery))
-        return 202, "plan queued"
+        return self._enqueue(Job("plan", number, sha, author, delivery=delivery))
 
     def _on_comment(self, p: dict, delivery: str) -> tuple[int, str]:
         if p.get("action") != "created" or "pull_request" not in p.get("issue", {}):
@@ -153,12 +152,21 @@ class Service:
             return 202, "not a ferry command"
         action, inventory = m.group(1), m.group(2)
         number = p["issue"]["number"]
+        # Both commands need write access, checked here: a refused request never costs a checkout or
+        # a credential (the engine checks again, along with every other apply gate).
+        if not self.vcs.can_apply(user):
+            self.vcs.post_note(number, f"`/ferry {action}` needs write access to this repo; @{user} doesn't have it.")
+            return 202, f"{action} refused: no write access"
         cr = self.vcs.get_change_request(number)
-        if action == "plan" and not self.vcs.can_apply(user):
-            self.vcs.post_note(number, f"`/ferry plan` needs write access to this repo; @{user} doesn't have it.")
-            return 202, "plan refused: no write access"
-        self.jobs.put(Job(action, number, cr.head_sha, user, inventory, delivery))
-        return 202, f"{action} queued"
+        return self._enqueue(Job(action, number, cr.head_sha, user, inventory, delivery))
+
+    def _enqueue(self, job: Job) -> tuple[int, str]:
+        try:
+            self.jobs.put_nowait(job)
+        except queue.Full:
+            log.warning("queue full (%s jobs): dropped %s for #%s", self.jobs.maxsize, job.action, job.pr)
+            return 503, "queue full, try again later"
+        return 202, f"{job.action} queued"
 
     def _say_waiting(self, number: int, sha: str, author: str) -> None:
         marker = f"{WAITING_MARKER} {sha} -->"
@@ -272,7 +280,7 @@ class Service:
         if interval <= 0:
             return
         while not stop.wait(interval):
-            self.jobs.put(Job("drift"))
+            self._enqueue(Job("drift"))
 
 
 def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
@@ -289,8 +297,9 @@ def make_handler(service: Service, max_body: int = 25 * 1024 * 1024):
 
         def do_GET(self):
             if self.path == "/healthz":
-                self._send(200, json.dumps({"ok": True, "queued": service.jobs.qsize(),
-                                            "last_job": service.last_job}))
+                # No error text here: it can name internal hosts and paths, and /healthz is unauthenticated.
+                last = {k: service.last_job[k] for k in ("job", "pr", "ok", "seconds") if k in service.last_job}
+                self._send(200, json.dumps({"ok": True, "queued": service.jobs.qsize(), "last_job": last}))
             else:
                 self._send(404, "not found")
 

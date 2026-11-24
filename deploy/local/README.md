@@ -35,18 +35,18 @@ flowchart LR
   F -->|ansible over SSH as root,\n30-min certificate| T
 ```
 
-| Lab piece | What it stands in for in production (Atomic) |
+| Lab piece | What it stands in for in production |
 |---|---|
-| `ferry-lab-ferry` (this repo's `Dockerfile`) | The ferry Nomad job (`deploy/nomad/ferry.nomad.hcl` is the starting point; the real one goes in atomic-terraform `cluster/`) |
-| `fakegh.py` on :18999 | api.github.com plus the GitHub App. It answers `/app`, the installation token, PR, files, reviews, comments and collaborator permission for PR #1. Writers: `james`, `pip`. |
-| `/tmp/ferry-lab/remote/acme/ansible.git` with `refs/pull/1/head` | github.com/Atomic-Industries/atomic-ansible (ferry fetches with `FERRY_GITHUB_GIT_URL=file:///remote`) |
+| `ferry-lab-ferry` (this repo's `Dockerfile`) | The ferry Nomad job (`deploy/nomad/ferry.nomad.hcl` is the starting point; the real one lives in your infrastructure-as-code repo) |
+| `fakegh.py` on :18999 | api.github.com plus the GitHub App. It answers `/app`, the installation token, PR, files, reviews, comments, collaborator permission, the branch's rulesets and the GraphQL review decision for PR #1. Writers: `james`, `pip`. |
+| `/tmp/ferry-lab/remote/acme/ansible.git` with `refs/pull/1/head` | your config repo on GitHub (ferry fetches with `FERRY_GITHUB_GIT_URL=file:///remote`) |
 | `ferry-lab-bao`, dev mode, root token `lab` | OpenBao on ops/ceph-1/ceph-2 |
-| `ssh-client-signer/` mount, role `ferry`, policy `ssh-sign-ferry` (set by `up.sh` with the CLI) | atomic-terraform `openbao/ssh.tf` (#230): the same values |
+| `ssh-client-signer/` mount, role `ferry`, policy `ssh-sign-ferry` (set by `up.sh` with the CLI) | your OpenBao config (terraform or CLI): the same values |
 | `auth/jwt-nomad`, role `ferry`, static public key; `mkjwt.py` mints the token | Nomad workload identity: the job's `identity { aud = ["openbao.io"] file = true }`, validated against Nomad's JWKS, bound on `nomad_job_id = ferry` |
 | `secret/ansible/vault-password` (dev kv-v2) | `infra/ansible/vault-password` (`infra/` kv-v2) |
-| `ferry-lab-target` (`target/Dockerfile`) | Every managed host after atomic-ansible `roles/ssh_ca` (#74): `TrustedUserCAKeys`, and root accepts only principal `ferry`. No authorized_keys at all here, so any login is a certificate login. |
+| `ferry-lab-target` (`target/Dockerfile`) | Every managed host once its sshd trusts the SSH user CA: `TrustedUserCAKeys`, and root accepts only principal `ferry`. No authorized_keys at all here, so any login is a certificate login. |
 | `/tmp/ferry-lab/state/locks.db` | The ferry job's host volume (`FERRY_LOCK_DB`) |
-| The config repo `up.sh` writes (one host, a `motd` role, one vaulted var) | atomic-ansible with its `ferry.yaml` |
+| The config repo `up.sh` writes (one host, a `motd` role, one vaulted var) | your config repo with its `ferry.yaml` |
 
 ## The loop, step by step
 
@@ -105,6 +105,10 @@ The playbooks run in a separate container, `ferry-lab-executor`: user `ferry-run
 - **OpenBao down** (`docker stop ferry-lab-bao`), then `lab.sh plan`: ferry comments the error on the PR (`ferry couldn't finish: URLError ...`) and the service stays up (`/healthz`). Checked Nov 23.
 - **The target refuses certificates** (`docker exec ferry-lab-target sh -c 'echo nobody > /etc/ssh/auth_principals/root'`), then `lab.sh open`: `❌ plan is not clean ... 1 unreachable`, so apply would be refused. Checked Nov 23.
 - **Config comes from main:** change `ferry.yaml` on the PR branch (for example `apply: {min_approvals: 0}`), `lab.sh push`, then `lab.sh apply`. An approval is still required.
+- **GitHub's own rules:** require two approvals on `main`, then approve once and apply. ferry refuses, naming the ruleset:
+  ```
+  curl -s localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":2}}]}'
+  ```
 - **Duplicate deliveries and bad signatures:** re-send a body with the same `X-GitHub-Delivery`, or with a wrong `X-Hub-Signature-256` (expect 401).
 - **Drift:** add `-e FERRY_DRIFT_INTERVAL_HOURS=0.01` to the ferry container in `up.sh`. Drift runs on `main` and writes `ansible_drift.prom` on the target, if it has a textfile dir.
 
@@ -112,7 +116,7 @@ To change ferry and re-test: edit `src/ferry/...`, then `python -m pytest -q`, t
 
 ## Known gaps before production
 
-- **atomic-ansible's `infra_secret` lookup** authenticates with the ops executor's client certificate (`/etc/ansible/ansible.cfg`). In ferry's job it must use the per-job token (`VAULT_TOKEN` / `ANSIBLE_HASHI_VAULT_TOKEN`, which ferry sets). The lab's config repo has no `infra/` lookups, so it doesn't exercise this.
+- **Secret lookups that authenticate some other way** (e.g. a client certificate configured in `/etc/ansible/ansible.cfg` on an existing executor host). In ferry's job it must use the per-job token (`VAULT_TOKEN` / `ANSIBLE_HASHI_VAULT_TOKEN`, which ferry sets). The lab's config repo has no `infra/` lookups, so it doesn't exercise this.
 - **Host keys:** the image sets `ANSIBLE_HOST_KEY_CHECKING=False`. Production should pin host keys, either with OpenBao host certificates (`@cert-authority` in known_hosts; phase 3 of the SSH plan) or a managed known_hosts file.
-- **Webhook ingress:** expose only `POST /webhook`, restricted to GitHub's hook IP ranges (atomic-terraform already maintains that list for another webhook).
+- **Webhook ingress:** expose only `POST /webhook`, restricted to GitHub's hook IP ranges (GitHub publishes them at `api.github.com/meta`).
 - **One instance:** locks are one SQLite file, so run one ferry per config repo, as Atlantis does.

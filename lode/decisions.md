@@ -43,7 +43,7 @@ Drift raises alerts; auto-apply of main is not implemented (James to decide).
 GitLab API via urllib so the package installs anywhere Ansible does.
 
 ## GitHub backend, for an Atlantis-style service
-Atomic runs ferry as a long-running service on Nomad with a GitHub App (James, 2026-11-23): webhooks
+ferry can run as a long-running service (e.g. on Nomad) with a GitHub App (decided 2026-11-23): webhooks
 in, clone with the App's installation token at the PR head SHA, comments as the App. In GitHub Actions
 a `pull_request` workflow comes from the PR branch, so a PR could take the job's credentials; the
 service keeps the credential and its config on the default branch. `GitHubBackend` is token-agnostic
@@ -69,7 +69,7 @@ token reaches git only via GIT_CONFIG_* env (http.extraHeader), never .git/confi
 auto-plan only for authors with write access; others wait for `/ferry plan` from a writer (a plan is
 root-level code execution). Per-job OpenBao credentials (workload-identity login, throwaway SSH key +
 CA certificate, vault password) live in a 0700 temp dir that is removed, and the token revoked, in a
-finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, atomic-terraform#230's SSH
+finally block. Verified end to end Nov 23: real OpenBao 2.7.2 (JWT login, an SSH signing
 role, sshd login with the certificate) and the built image against a fake GitHub API plus a real git
 remote (plan, refused apply, apply, unlock).
 
@@ -79,6 +79,35 @@ the previous job's open master connection, so it ran under the previous job's ce
 job's credentials were deleted, and sshd attributed it wrongly. credentials.job_credentials now sets
 ANSIBLE_SSH_CONTROL_PATH_DIR inside the job's temp dir (and ControlPersist 30s): one certificate login
 per job, verified by distinct serials in the target's sshd log.
+
+## Approvals must come from someone who could apply
+Found reviewing the service (2026-11-23): `approvers()` returned every user whose latest review
+approved the head, and the engine only dropped the author. On a public GitHub repo without branch
+protection requiring reviews, anyone can leave an approving review, and a drive-by approval was
+enough to apply in the local lab. The engine now counts an approval only if `can_apply()` is true for
+that user (write on GitHub, Developer+ on GitLab) and it isn't ferry's own account (a job that got
+hold of the service's credentials could otherwise approve). With `apply.allowed_users` set, the
+applier must be listed **and** still have access.
+
+## GitHub's own merge rules gate apply too
+2026-11-24: ferry's approval check is its own floor, not the repo's rules. A branch could require two
+reviews, a CODEOWNERS review or a passing check and ferry would still apply on one approval. Apply
+now also asks GitHub (`merge_rule_blockers`, `vcs/github_protection.py`): GraphQL `reviewDecision`,
+per-check `isRequired`, and `mergeStateStatus`, with classic protection and active rulesets read to
+name the unmet rule and find required checks that never reported. GitHub's verdict is preferred over
+re-implementing the rules; the rules are still checked independently because `mergeStateStatus` is
+computed for the viewer (an App with bypass sees CLEAN). Checks posted by ferry's own App, or named in
+`FERRY_GITHUB_OWN_CHECKS` (service env, never the repo), are ignored so a required ferry check can't
+deadlock the apply. Unreadable rules (missing App permission) refuse, naming the permission. REST
+`mergeable_state` `blocked` no longer refuses by itself: the new check explains it.
+
+## Permission check before a job exists
+Found reviewing the service (2026-11-23): `/ferry apply` from anyone was queued, and the worker did
+the checkout, the OpenBao login and the SSH signing before the engine refused it. Now both commands
+check `can_apply(commenter)` in the webhook handler, so a refused request costs one API call and no
+credential (the engine still re-checks every gate). The queue is bounded (`max_queued_jobs`, 503 when
+full), so commenters on a public repo can't pile up unlimited jobs, and `/healthz` (unauthenticated)
+no longer returns error text, which can name internal hosts and paths.
 
 ## Certificate lifetime, job timeout, redaction of job credentials
 Found reviewing the service (2026-11-23). A signed certificate outlives its job: revoking the job's

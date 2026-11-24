@@ -31,7 +31,7 @@ docker run -d --name ferry-lab-bao --network "$NET" -p 18200:8200 --cap-add IPC_
 bao() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=lab ferry-lab-bao bao "$@"; }
 for _ in $(seq 1 30); do bao status >/dev/null 2>&1 && break; sleep 1; done
 
-# = atomic-terraform openbao/ssh.tf (#230): mount, CA, role "ferry", policy ssh-sign-ferry.
+# = what production OpenBao config sets up: mount, CA, role "ferry", policy ssh-sign-ferry.
 bao secrets enable -path=ssh-client-signer ssh >/dev/null
 bao write ssh-client-signer/config/ca generate_signing_key=true key_type=ed25519 >/dev/null
 bao write ssh-client-signer/roles/ferry - >/dev/null <<'JSON'
