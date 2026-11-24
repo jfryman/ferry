@@ -209,6 +209,14 @@ sequenceDiagram
 - **Drift** every `FERRY_DRIFT_INTERVAL_HOURS` on the default branch.
 - `GET /healthz` reports the queue and the last job. Settings: `ferry serve --help`.
 
+**Edge routing:** `/jobs` and `/metrics` must never be publicly routed. They are unauthenticated
+internal audit/monitoring endpoints; use private-network access and scrape them internally.
+Allow only authenticated `POST /api/runs` and `POST /api/runs/{id}/lease|finish` at the operator
+edge; add `POST /webhook` only when enabling code-host hooks, with source restrictions.
+Deny every other path/method, including `/healthz` at the public edge. The current service uses
+one listener (no separate `FERRY_API_LISTEN`); enforce the split in your ingress/reverse proxy.
+Do not expose its backend port directly. The Nomad example has an explicit path allowlist.
+
 Deploy: `Dockerfile` (non-root image with ansible-core and git) and an example Nomad job in
 `deploy/nomad/ferry.nomad.hcl`. **To see the whole loop working locally** (OpenBao, Nomad-style
 workload identity, SSH certificates, a managed host, a fake GitHub), run `deploy/local/up.sh` and
@@ -504,7 +512,8 @@ The API is off unless **both** `FERRY_RUN_OIDC_ISSUER` and `FERRY_RUN_OIDC_AUDIE
 The issuer is OpenBao's identity issuer (for example `https://bao.example.com/v1/identity/oidc`),
 not the login/auth endpoint. Ferry reads `<issuer>/.well-known/keys` and accepts **RS256 only**;
 configure the OpenBao identity key accordingly. Signature, issuer, audience and expiry are checked
-on every call. A person has no SSH signing permission and sends ferry an **identity JWT**, never
+on every call. Issuance/activation (`iat`/`nbf`) allow 30 seconds of clock skew; expiry
+never does. A person has no SSH signing permission and sends ferry an **identity JWT**, never
 an OpenBao API token. No webhook signature authorizes these API routes, or vice versa.
 
 Authorization requires both:
@@ -526,13 +535,19 @@ apply:
 that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
 `POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Finish accepts
 `{ok, counts, changed_hosts}`; results are operator-reported, not independent execution attestation.
-Apply kill switches also refuse operator applies. A PR lock refuses a run; a run lock refuses a PR.
+CLI check versus apply is **client-chosen**, not enforced by the certificate: both receive the
+same inventory credential. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
+refuses **all new CLI runs, including check**. It does not revoke already-issued credentials. A PR lock refuses a run; a run lock refuses a PR.
 `FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
 actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
-`/jobs` records `trigger: cli`, subject, run ID, inventory, limit, mode, full SHA, result and the
+`FERRY_RUN_NAME_CLAIM` selects a signed display-name claim (default `name`). The service strips
+Unicode control/format characters, collapses whitespace and bounds it to 128 characters; missing,
+non-string or empty names fall back to `sub`. Authorization and run ownership always use stable
+`sub`, never the display name. Lock holders show both; names are not metric labels.
+`/jobs` records `trigger: cli`, subject, `display_name`, run ID, inventory, limit, mode, full SHA, result and the
 certificate **serial**. The role still owns `key_id_format`: match sshd's serial to the audit.
 `ferry_jobs_by_trigger_total{trigger="cli",action="plan|apply",result="..."}` counts finishes.
-Keep `/jobs` private: it contains operator identities and inventory names.
+Keep `/jobs` and `/metrics` private and off public routes (see deployment guidance above).
 
 ### Admin-token demo login (Google OIDC later)
 
@@ -554,7 +569,8 @@ The CLI defaults to `bao read -field=token identity/oidc/token/ferry` (this endp
 `bao write`). Override with `--token-command` or `FERRY_RUN_TOKEN_COMMAND`; arguments are parsed
 without a shell. Google OIDC can later authenticate the same entity; the service is unchanged.
 
-**Security limits:** a stolen identity JWT can request credentials for allowed inventories until it
+**Security limits:** check/apply mode is a client assertion, not a credential restriction; the apply
+switch therefore gates both CLI modes. A stolen identity JWT can request credentials for allowed inventories until it
 expires, and renew or finish that subject's runs. A run ID alone grants nothing. Certificates cannot
 be revoked by finishing or missing a lease: an abandoned client may retain host access until the
 certificate expires, and existing SSH sessions may survive it. Lease expiry frees serialization,

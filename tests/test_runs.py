@@ -186,7 +186,7 @@ def test_invalid_start_input_never_mints(api, change):
 @pytest.mark.parametrize('mode', ['check', 'apply'])
 def test_command_disabled_never_mints(api, mode):
     api.svc.settings.allow_commands = ()
-    assert api.request(data={**api.payload, 'mode': mode}) == (403, {'error': 'disabled'})
+    assert api.request(data={**api.payload, 'mode': mode}) == (403, {'error': 'CLI runs disabled while applies are disabled: check/apply is client-chosen'})
     assert_not_minted(api)
 
 
@@ -213,7 +213,7 @@ def test_allowed_group_can_start_only_authorized_inventory(api):
     assert api.request(token=identity, data={**api.payload, 'inventory': 'restricted'})[0] == 403
     assert_not_minted(api)
     assert api.request(token=identity)[0] == 201
-    assert api.locks.get('homelab').holder.endswith('(group-member-example)')
+    assert api.locks.get('homelab').holder.endswith('(group-member-example; sub=group-member-example)')
 
 
 def test_run_lock_blocks_pr_without_vcs_lookup(api):
@@ -378,5 +378,52 @@ def test_switch_flipped_during_config_fetch_never_mints(api):
         api.svc.settings.allow_commands = ('plan',)
         return original
     api.main.side_effect = flip_switch
-    assert api.request() == (403, {'error': 'disabled'})
+    assert api.request() == (403, {'error': 'CLI runs disabled while applies are disabled: check/apply is client-chosen'})
+    assert_not_minted(api)
+
+
+@pytest.mark.parametrize('via_file', [False, True])
+def test_apply_off_refuses_check_without_minting(api, via_file):
+    if via_file:
+        switches = api.tmp/'freeze-switches'
+        switches.mkdir(parents=True, exist_ok=True)
+        api.svc.settings.switch_dir = str(switches)
+        (switches/'disable-apply').write_text('freeze')
+    else:
+        api.svc.settings.allow_commands = ('plan',)
+    status, body = api.request(data={**api.payload, 'mode': 'check'})
+    assert status == 403 and 'client-chosen' in body['error']
+    assert_not_minted(api)
+
+
+@pytest.mark.parametrize('claim,value,expected', [
+    ('name', 'Demo Operator', 'Demo Operator'),
+    ('preferred_name', '  Demo\nOperator\x1b\u202e ', 'DemoOperator'),
+    ('name', 'x'*200, 'x'*128),
+    ('name', None, SUBJECT),
+])
+def test_display_name_is_bounded_sanitized_and_never_authorizes(api, claim, value, expected):
+    api.svc.settings.run_name_claim = claim
+    status, run = api.request(token=api.token({claim: value}))
+    assert status == 201
+    with sqlite3.connect(api.locks.path) as db:
+        holder = db.execute('SELECT holder FROM locks').fetchone()[0]
+    assert expected in holder and SUBJECT in holder
+    assert api.request(f"/api/runs/{run['run_id']}/finish", data={'ok': True})[0] == 200
+    job = api.svc.state.jobs()[0]
+    assert job['display_name'] == expected and job['subject'] == SUBJECT
+    assert api.request(token=api.token({'sub': 'not-authorized', claim: SUBJECT}))[0] == 403
+
+
+@pytest.mark.parametrize('field', ['iat', 'nbf'])
+@pytest.mark.parametrize('offset,accepted', [(30, True), (31, False)])
+def test_identity_fixed_activation_leeway(api, field, offset, accepted):
+    status, _ = api.request(token=api.token({field: NOW+offset}))
+    assert status == (201 if accepted else 401)
+    if not accepted:
+        assert_not_minted(api)
+
+
+def test_identity_expiration_has_no_leeway(api):
+    assert api.request(token=api.token({'exp': NOW-1, 'iat': NOW+30}))[0] == 401
     assert_not_minted(api)

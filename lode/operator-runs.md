@@ -29,3 +29,12 @@
   is trusted to exercise its inventory credentials. Check mode is not a security sandbox.
 
 [Local lab](../deploy/local/README.md): `run`, `run-apply`, `run-denied`, `run-contention`, `run-expiry`.
+
+## Operator identity and routing
+- Apply disable gates every new CLI run: check/apply is client-chosen and the certificate
+  cannot enforce check mode. Existing credentials are not revoked by a switch.
+- Authorization/ownership use `sub`. `FERRY_RUN_NAME_CLAIM` (default `name`) supplies a
+  sanitized 128-character display name for lock holders and audit, never metric labels.
+- `iat`/`nbf` permit 30 seconds skew; `exp` remains strict.
+- One backend listener: ingress must expose only authenticated POST operator API routes,
+  plus explicitly enabled code-host webhook routes. `/jobs` and `/metrics` stay private.

@@ -6,6 +6,7 @@ import re
 import sqlite3
 import struct
 import threading
+import unicodedata
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -160,9 +161,9 @@ class Runs:
                 raise ValueError()
         except Exception:
             raise RunError(400, 'invalid public key')
-        off = svc._disabled('apply' if data['mode'] == 'apply' else 'plan')
+        off = svc._disabled('apply')
         if off:
-            raise RunError(403, 'disabled')
+            raise RunError(403, 'CLI runs disabled while applies are disabled: check/apply is client-chosen')
         if svc.bao is None:
             raise RunError(503, 'credentials not configured')
         # Separate main checkout from the webhook worker: it may be reading its own main directory.
@@ -181,12 +182,17 @@ class Runs:
         identities = {claims['sub'], *claims.get('groups', [])}
         if not identities.intersection(allowed):
             raise RunError(403, 'inventory not allowed')
-        if svc._disabled('apply' if data['mode'] == 'apply' else 'plan'):
-            raise RunError(403, 'disabled')
+        if svc._disabled('apply'):
+            raise RunError(403, 'CLI runs disabled while applies are disabled: check/apply is client-chosen')
         now = svc.clock()
         rid = uuid.uuid4().hex
-        holder = f"run:{rid} ({claims['sub']})"
-        run = dict(run_id=rid, holder=holder, subject=claims['sub'], inventory=inv.name,
+        name = claims.get(svc.settings.run_name_claim)
+        if not isinstance(name, str):
+            name = claims['sub']
+        name = ''.join(c for c in name if not unicodedata.category(c).startswith('C'))
+        name = ' '.join(name.split())[:128] or claims['sub']
+        holder = f"run:{rid} ({name}; sub={claims['sub']})"
+        run = dict(run_id=rid, holder=holder, subject=claims['sub'], display_name=name, inventory=inv.name,
                    limit=limit, mode=data['mode'], sha=data['sha'], started=now,
                    certificate_serial=None, certificate_expires_at=now + svc.settings.run_lease_seconds,
                    lease_expires_at=now + svc.settings.run_lease_seconds)

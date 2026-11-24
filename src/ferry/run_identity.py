@@ -46,8 +46,11 @@ class IdentityVerifier:
             exp = claims['exp']
             if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp) or exp <= now:
                 raise ValueError()
-            if claims.get('nbf', 0) > now or claims.get('iat', 0) > now:
-                raise ValueError()
+            # Fixed skew only for activation/issuance; expiration remains strict.
+            for field in ('nbf', 'iat'):
+                value = claims.get(field, 0)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value > now + 30:
+                    raise ValueError()
             aud = claims.get('aud')
             if claims.get('iss') != self.issuer or not (aud == self.audience or
                     isinstance(aud, list) and self.audience in aud):

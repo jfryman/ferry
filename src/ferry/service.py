@@ -204,6 +204,7 @@ class Settings:
     run_oidc_audience: str | None = None
     run_allowed_subjects: tuple = ()
     run_allowed_groups: tuple = ()
+    run_name_claim: str = "name"
     run_lease_seconds: float = 300.0
 
 

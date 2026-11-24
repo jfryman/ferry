@@ -71,7 +71,8 @@ JSON
 say "OpenBao identity OIDC: RS256, audience ferry, allowed and denied demo operators"
 bao write identity/oidc/config issuer=http://ferry-lab-bao:8200 >/dev/null
 bao write identity/oidc/key/ferry algorithm=RS256 allowed_client_ids=ferry >/dev/null
-bao write identity/oidc/role/ferry key=ferry client_id=ferry ttl=5m >/dev/null
+bao write identity/oidc/role/ferry key=ferry client_id=ferry ttl=5m \
+  template='{"name": {{identity.entity.name}}}'  >/dev/null
 bao policy write ferry-operator-identity - >/dev/null <<'HCL'
 path "identity/oidc/token/ferry" { capabilities = ["read"] }
 HCL

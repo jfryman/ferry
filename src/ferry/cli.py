@@ -257,7 +257,7 @@ def build_service(vcs: str | None = None):
     if missing:
         sys.exit(f"ferry serve: missing {', '.join(missing)}")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    common = dict(run_oidc_issuer=_env("FERRY_RUN_OIDC_ISSUER"),
+    common = dict(run_name_claim=_env("FERRY_RUN_NAME_CLAIM", "name"), run_oidc_issuer=_env("FERRY_RUN_OIDC_ISSUER"),
                   run_oidc_audience=_env("FERRY_RUN_OIDC_AUDIENCE"),
                   run_allowed_subjects=tuple((_env("FERRY_RUN_ALLOWED_SUBJECTS") or "").split(",")),
                   run_allowed_groups=tuple((_env("FERRY_RUN_ALLOWED_GROUPS") or "").split(",")),
