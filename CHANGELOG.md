@@ -18,6 +18,9 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 - **Higher dependency floors** (#80): `PyYAML>=6.0.4`, `pytest>=9.2.0` (the `test` extra) and
   `setuptools>=84.2.1` to build. If you pin older versions, raise those pins. The test suite passes
   against exactly these versions. Supersedes Dependabot #75–#78.
+- **Contributor guide: how to write changelog entries** (#79), in `AGENTS.md`. No behaviour change.
+- **Dependabot also watches GitHub Actions and the Docker base images** (#80), as well as pip. No
+  behaviour change.
 
 ## [0.4.1] - 2026-11-24
 
