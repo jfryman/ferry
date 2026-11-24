@@ -4,11 +4,20 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 
 ## [0.4.2] - 2026-11-24
 
+### Security
+- **cryptography floor raised to 50.0.2** (#80). The old floor (`>=42`) allowed versions with
+  published advisories, including a vulnerable OpenSSL bundled in wheels below 48.0.1
+  (GHSA-537c-gmf6-5ccf) and fixes in 49.0.0 and 50.0.0. ferry uses cryptography for RS256 identity
+  token checks and OpenSSH key parsing; the other advisories (PKCS#7 decryption, X.509 path
+  building) are in code ferry doesn't call. **Who is affected:** pip or wheel installs of the
+  `service` or `test` extras into an environment that already had an older cryptography, for
+  example a CI image or an operator's virtualenv. The published container images already shipped
+  50.0.2. **What to do:** upgrade to 0.4.2, or pin `cryptography>=50.0.2`.
+
 ### Changed
-- **Higher dependency floors** (#80): `PyYAML>=6.0.4`, `cryptography>=50.0.2` (the `service` and
-  `test` extras) and `pytest>=9.2.0`, and `setuptools>=84.2.1` to build. If you install ferry into an
-  environment that pins older versions, raise those pins. The test suite passes against exactly
-  these versions. Supersedes Dependabot #75–#78.
+- **Higher dependency floors** (#80): `PyYAML>=6.0.4`, `pytest>=9.2.0` (the `test` extra) and
+  `setuptools>=84.2.1` to build. If you pin older versions, raise those pins. The test suite passes
+  against exactly these versions. Supersedes Dependabot #75–#78.
 
 ## [0.4.1] - 2026-11-24
 
@@ -18,17 +27,18 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   network refuses CLI certificates used from operator machines; a second role carries the operator
   networks (office LAN, VPN, tailnet) as OpenBao configuration. See `docs/run.md`.
 
+### Changed
+- **Shorter README, topic docs under `docs/`** (#66): configuration, `ferry serve`, `ferry run`,
+  security and operations each have a page, plus `AGENTS.md` for contributors. No behaviour change.
+- **`SECURITY.md`** (#72, part of #71): how to report a vulnerability privately, supported versions
+  and the 0.1.x approval advisory. The Nomad example now uses v0.4.0.
+
 ### Fixed
 - `ferry run` shows the service's refusal reason, for example `service refused request (HTTP 409):
   inventory locked` (#67). Only a short JSON `error` from the service is shown, with control
   characters removed; any other body (a proxy's page) still shows only the status.
 - A failed `ssh-keygen` (for example a uid with no passwd entry in a container) is a clean
   `ferry run` error, not a traceback (#68).
-
-### Docs
-- The README is short now, with topic docs under `docs/`, an `AGENTS.md`, and working diagrams (#66).
-- `SECURITY.md` (private reporting, supported versions, the 0.1.x approval advisory); the Nomad
-  example is on v0.4.0; the CLI docstring lists `run`, `executor` and `switch` (#71, #72).
 
 ## [0.4.0] - 2026-11-24
 
