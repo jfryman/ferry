@@ -966,3 +966,60 @@ def test_unreadable_commits_refuse(world, monkeypatch):
     world.deliver("issue_comment", world.comment_event("/ferry apply"))
     [refused] = world.drain()
     assert not refused["ok"] and any("couldn't tell who pushed" in r for r in refused["inventories"]["homelab"]["reasons"])
+
+
+# ---- #26: collections ---------------------------------------------------------------------------------
+
+def add_requirements(world, repo):
+    git(repo, "checkout", "-q", "feature")
+    (repo / "requirements.yml").write_text("collections: [community.general]\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "requirements")
+    world.sha = git(repo, "rev-parse", "HEAD")
+    bare = world.tmp / "remote.git"
+    git(repo, "push", "-q", str(bare), "feature")
+    git(bare, "update-ref", "refs/pull/1/head", world.sha)
+    world.svc.state.saw_head(1, world.sha, NOW - 60)
+
+
+def test_galaxy_skip_never_reads_requirements(world, repo, monkeypatch):
+    add_requirements(world, repo)
+    world.svc.settings.galaxy = "skip"
+    monkeypatch.setattr(world.svc.workspace, "collections", lambda *a, **k: pytest.fail("installed"))
+    world.deliver("pull_request", world.pr_event())
+    [r] = world.drain()
+    assert r["ok"] and "ANSIBLE_COLLECTIONS_PATH" not in world.envs[-1][1]
+
+
+def test_with_an_executor_galaxy_runs_there(world, repo, monkeypatch):
+    from ferry import executor as executor_mod
+    add_requirements(world, repo)
+    world.svc.settings.executor_socket = "/run/ferry/executor.sock"
+    asked = []
+    monkeypatch.setattr(executor_mod, "install_collections",
+                        lambda sock, co, **kw: asked.append((sock, kw)) or "/executor/collections/abc")
+    monkeypatch.setattr(world.svc.workspace, "collections", lambda *a, **k: pytest.fail("ran in the service"))
+    world.deliver("pull_request", world.pr_event())
+    [r] = world.drain()
+    assert r["ok"] and asked[0][0] == "/run/ferry/executor.sock" and asked[0][1]["timeout"] == 300.0
+    assert world.envs[-1][1]["ANSIBLE_COLLECTIONS_PATH"].startswith("/executor/collections/abc")
+
+
+def test_a_galaxy_timeout_fails_the_job_visibly_and_the_next_job_runs(world, repo, monkeypatch):
+    from ferry import galaxy
+    add_requirements(world, repo)
+
+    calls = []
+
+    def hang_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise galaxy.GalaxyError("ansible-galaxy timed out after 300s")
+        return {}
+    monkeypatch.setattr(world.svc.workspace, "collections", hang_once)
+    world.deliver("pull_request", world.pr_event())
+    [r] = world.drain()
+    assert r["result"] == "error" and "timed out" in world.comments[-1]["body"]
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    [r2] = world.drain()
+    assert r2["ok"], r2

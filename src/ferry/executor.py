@@ -25,6 +25,11 @@ outlives its job and sees the next job's credentials.
 
 Protocol: one JSON line from the service, then JSON lines back: {"out": line} ... and a final
 {"rc": int, "timed_out": bool, "events": base64}, or {"error": text}.
+
+The change's collections are installed here too (#26): {"v": 1, "op": "galaxy", "cwd": checkout,
+"timeout": s, "server": url|null, "max_age_days": n} answers {"path": dir} or {"error": text}. The
+executor reads the checkout's requirements.yml itself and installs into its own writable cache
+(`collections_root`), with ferry.galaxy's minimal environment and timeout.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 
+from . import galaxy as galaxy_mod
 from .results import RunResult, parse_file
 from .runner import CREDS_DIR_ENV, AnsibleRunner, RunRequest, ferry_ansible_env
 
@@ -122,6 +128,32 @@ class ExecutorRunner(AnsibleRunner):
             return parse_file(events, self.busy_marker, rc=int(final["rc"]), log_tail="".join(tail))
 
 
+def install_collections(socket_path: str, checkout, timeout: float = galaxy_mod.DEFAULT_TIMEOUT,
+                        server: str | None = None, max_age_days: float = galaxy_mod.DEFAULT_MAX_AGE_DAYS) -> str:
+    """Ask the executor to install `checkout`'s requirements.yml; returns its collections dir."""
+    msg = {"v": 1, "op": "galaxy", "cwd": str(checkout), "timeout": timeout, "server": server,
+           "max_age_days": max_age_days}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout + 60)
+        for attempt in range(CONNECT_TRIES):
+            try:
+                conn.connect(socket_path)
+                break
+            except (FileNotFoundError, ConnectionRefusedError) as e:
+                if attempt == CONNECT_TRIES - 1:
+                    raise ExecutorError(f"can't reach the executor at {socket_path}: {e}") from e
+                time.sleep(0.5)
+        conn.sendall(json.dumps(msg).encode() + b"\n")
+        line = conn.makefile("r", encoding="utf-8").readline()
+    try:
+        out = json.loads(line) if line else {}
+    except ValueError:
+        out = {}
+    if "path" not in out:
+        raise ExecutorError(f"executor: {out.get('error', 'connection closed during the collections install')}")
+    return str(out["path"])
+
+
 # ---- the executor ------------------------------------------------------------------------------
 
 
@@ -138,10 +170,14 @@ def _job_file(job: Path, name: str) -> Path:
 
 class Executor:
     def __init__(self, socket_path: str, roots: list[str], ansible_playbook: str = "ansible-playbook",
-                 reap_all: bool | None = None):
+                 reap_all: bool | None = None, galaxy: str = "ansible-galaxy",
+                 collections_root: str | None = None):
         self.socket_path = socket_path
         self.roots = [Path(r).resolve() for r in roots]
         self.bin = ansible_playbook
+        self.galaxy = galaxy
+        # Writable by the executor only; the work dir (the checkouts) is read-only here.
+        self.collections_root = Path(collections_root or os.path.join(tempfile.gettempdir(), "ferry-collections"))
         # Kill everything else after each job: only safe (and only complete) as the container's PID 1.
         self.reap_all = os.getpid() == 1 if reap_all is None else reap_all
         self._sock: socket.socket | None = None
@@ -225,15 +261,36 @@ class Executor:
                 raise ExecutorError("request too large")
         return json.loads(buf)
 
+    def _where(self, cwd) -> Path:
+        where = Path(str(cwd)).resolve()
+        if not where.is_dir() or not any(where == r or r in where.parents for r in self.roots):
+            raise ExecutorError(f"cwd {cwd!r} is not a directory under {[str(r) for r in self.roots]}")
+        return where
+
+    def _galaxy(self, msg: dict) -> dict:
+        where = self._where(msg.get("cwd"))
+        server = msg.get("server")
+        if server is not None and not isinstance(server, str):
+            raise ExecutorError("bad server")
+        req = where / "requirements.yml"
+        if req.is_symlink() or not req.is_file():
+            raise ExecutorError("no requirements.yml in the checkout")
+        try:
+            dest = galaxy_mod.install(req, self.collections_root, galaxy=self.galaxy,
+                                      timeout=float(msg.get("timeout") or galaxy_mod.DEFAULT_TIMEOUT),
+                                      server=server or None,
+                                      max_age_days=float(msg.get("max_age_days") or galaxy_mod.DEFAULT_MAX_AGE_DAYS))
+        except galaxy_mod.GalaxyError as e:
+            raise ExecutorError(str(e)) from e
+        return {"path": str(dest)}
+
     def _check(self, msg: dict) -> tuple[list[str], Path, dict[str, str], dict[str, bytes], float | None]:
         args, cwd, env, files = msg.get("args"), msg.get("cwd"), msg.get("env") or {}, msg.get("files") or {}
         if msg.get("v") != 1 or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
             raise ExecutorError("bad request")
         if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
             raise ExecutorError("bad env")
-        where = Path(str(cwd)).resolve()
-        if not where.is_dir() or not any(where == r or r in where.parents for r in self.roots):
-            raise ExecutorError(f"cwd {cwd!r} is not a directory under {[str(r) for r in self.roots]}")
+        where = self._where(cwd)
         blobs = {}
         for name, b64 in files.items():
             data = base64.b64decode(b64)
@@ -252,8 +309,12 @@ class Executor:
                 return False
 
         try:
-            args, cwd, req_env, files, timeout = self._check(self._read_request(conn))
-        except (ExecutorError, ValueError) as e:
+            msg = self._read_request(conn)
+            if isinstance(msg, dict) and msg.get("op") == "galaxy" and msg.get("v") == 1:
+                send(self._galaxy(msg))
+                return
+            args, cwd, req_env, files, timeout = self._check(msg)
+        except (ExecutorError, ValueError, OSError) as e:
             send({"error": str(e)})
             return
         job = Path(tempfile.mkdtemp(prefix="ferry-job-"))
