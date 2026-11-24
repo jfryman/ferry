@@ -2,7 +2,7 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
-## [Unreleased]
+## [0.4.2] - 2026-11-24
 
 ### Changed
 - **Higher dependency floors** (#80): `PyYAML>=6.0.4`, `cryptography>=50.0.2` (the `service` and
@@ -216,6 +216,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[0.4.2]: https://github.com/jfryman/ferry/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jfryman/ferry/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jfryman/ferry/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jfryman/ferry/compare/v0.2.1...v0.3.0
