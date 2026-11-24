@@ -2,6 +2,16 @@
 
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
+## [Unreleased]
+
+### Added
+- **Homebrew install for the CLI** (#86): `brew install jfryman/tap/ferry` on macOS or Linux,
+  from [jfryman/homebrew-tap](https://github.com/jfryman/homebrew-tap). The formula installs the
+  `ferry` CLI for `ferry run`. It doesn't install Ansible or the `service` extra, so install the
+  `ansible-core` version your repository pins yourself. The tap follows new releases
+  automatically. Without Homebrew, `pipx install 'git+https://github.com/jfryman/ferry@vX.Y.Z'`
+  works too; see [docs/run.md](docs/run.md#install). Nothing changes for existing installs.
+
 ## [0.4.2] - 2026-11-24
 
 ### Security
@@ -229,6 +239,7 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
+[Unreleased]: https://github.com/jfryman/ferry/compare/v0.4.2...HEAD
 [0.4.2]: https://github.com/jfryman/ferry/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jfryman/ferry/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jfryman/ferry/compare/v0.3.0...v0.4.0

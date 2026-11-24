@@ -106,8 +106,22 @@ The container image runs the service and the executor:
 docker pull ghcr.io/jfryman/ferry:latest
 ```
 
-For CI jobs or a workstation, install from a release tag. ferry needs Python 3.11 or newer and
-`ansible-core`:
+On a workstation (macOS or Linux), install the CLI for [`ferry run`](docs/run.md) with Homebrew:
+
+```bash
+brew install jfryman/tap/ferry
+```
+
+The formula comes from [jfryman/homebrew-tap](https://github.com/jfryman/homebrew-tap). It
+installs the CLI without Ansible, so you can use the `ansible-core` version your repository pins.
+Without Homebrew, use pipx with a release tag:
+
+```bash
+pipx install 'git+https://github.com/jfryman/ferry@vX.Y.Z'
+pipx install 'ansible-core~=2.20.0'
+```
+
+For CI jobs, install from a release tag. ferry needs Python 3.11 or newer and `ansible-core`:
 
 ```bash
 pip install 'git+https://github.com/jfryman/ferry@vX.Y.Z' 'ansible-core~=2.20.0'
