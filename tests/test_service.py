@@ -1023,3 +1023,73 @@ def test_a_galaxy_timeout_fails_the_job_visibly_and_the_next_job_runs(world, rep
     world.deliver("issue_comment", world.comment_event("/ferry plan"))
     [r2] = world.drain()
     assert r2["ok"], r2
+
+
+# ---- #27: bare apply over several inventories ----------------------------------------------------
+
+def failed_run():
+    return ([ev_result("ntp-1", "Write chrony.conf", "failed", role="chrony", msg="boom"),
+             ev_stats(**{"ntp-1": stats(ok=1, failures=1)})], 2)
+
+
+def two_inventory_world(repo, tmp_path, apply_extra="", runs=()):
+    (repo / "inventories/prod").mkdir(parents=True, exist_ok=True)
+    (repo / "inventories/prod/hosts.yml").write_text("all: {hosts: {ntp-1: {}}}\n")
+    (repo / "ferry.yaml").write_text(
+        "inventories:\n  - {name: homelab, path: inventories/homelab}\n  - {name: prod, path: inventories/prod}\n"
+        "policy:\n  check_mode_false_allow: ['roles/printer_guard/**']\n"
+        "apply:\n  max_plan_age_hours: 24\n" + apply_extra)
+    w = World(repo, tmp_path / "w", runs=runs)
+    w.gh.routes[("GET", f"{R}/pulls/1/files")] = [{"filename": "inventories/homelab/host_vars/ntp-1.yml"},
+                                                  {"filename": "inventories/prod/host_vars/ntp-1.yml"}]
+    return w
+
+
+def test_a_bare_apply_stops_at_the_first_inventory_that_fails(repo, tmp_path, monkeypatch):
+    w = two_inventory_world(repo, tmp_path, runs=(clean_run(), clean_run(), failed_run(), clean_run()))
+    w.deliver("issue_comment", w.comment_event("/ferry plan"))
+    [plan] = w.drain()
+    assert plan["ok"], plan
+    w.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": w.sha})
+    w.deliver("issue_comment", w.comment_event("/ferry apply"))
+    [applied] = w.drain()
+    assert not applied["ok"]
+    assert len(w.runner.requests) == 3  # two plans and the failed homelab apply: prod never ran
+    assert applied["inventories"]["prod"]["reasons"] == ["not run: `homelab` didn't apply cleanly"]
+    assert "`prod`" in w.comments[-1]["body"] and "not run" in w.comments[-1]["body"]
+
+
+def test_a_refused_first_inventory_stops_the_rest(repo, tmp_path, monkeypatch):
+    w = two_inventory_world(repo, tmp_path, runs=(clean_run(), clean_run()))
+    w.deliver("issue_comment", w.comment_event("/ferry plan prod"))
+    w.drain()  # only prod planned: homelab has no plan and is refused
+    w.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": w.sha})
+    minted = count_credentials(monkeypatch)
+    w.deliver("issue_comment", w.comment_event("/ferry apply"))
+    [applied] = w.drain()
+    assert not applied["ok"] and not minted and len(w.runner.requests) == 1
+
+
+def test_require_inventory_refuses_a_bare_apply_before_credentials(repo, tmp_path, monkeypatch):
+    w = two_inventory_world(repo, tmp_path, apply_extra="  require_inventory: true\n",
+                            runs=(clean_run(), clean_run(), clean_run()))
+    w.deliver("issue_comment", w.comment_event("/ferry plan"))
+    w.drain()
+    w.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": w.sha})
+    minted = count_credentials(monkeypatch)
+    w.deliver("issue_comment", w.comment_event("/ferry apply"))
+    [refused] = w.drain()
+    assert not refused["ok"] and not minted and "`homelab`, `prod`" in w.comments[-1]["body"]
+    w.deliver("issue_comment", w.comment_event("/ferry apply homelab"))
+    [applied] = w.drain()
+    assert applied["ok"], applied and len(minted) == 1
+
+
+def test_a_single_inventory_repo_applies_bare_as_before(world):
+    world.svc.settings  # one inventory, require_inventory off: unchanged
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [applied] = world.drain()
+    assert applied["ok"]
