@@ -3,6 +3,7 @@
 operator() {
   local person=${LAB_OPERATOR:-demo}
   docker run --rm -u "$(id -u):$(id -g)" --network ferry-lab \
+    -e LAB_BRANCH="${LAB_BRANCH:-feature}" \
     -v "$LAB/remote:/remote:ro" -v "$LAB/operators/$person.token:/operator/token:ro" \
     ferry-operator:lab "$@"
 }
@@ -35,7 +36,12 @@ stop_operator() { docker rm -f ferry-lab-operator >/dev/null 2>&1 || true; }
 # These scenarios intentionally alter PR state; close releases the PR lock before starting.
 case "$1" in
   run) operator site.yml ;;
-  run-apply) operator --apply site.yml ;;
+  run-apply) LAB_BRANCH=main operator --apply site.yml ;;
+  run-apply-unmerged)
+    if out=$(operator --apply site.yml 2>&1); then
+      echo 'FAIL apply of an unmerged SHA was accepted' >&2; exit 1
+    fi
+    assert_output apply-needs-main-head '409' "$out" ;;
   run-denied)
     if out=$(LAB_OPERATOR=denied operator site.yml 2>&1); then
       echo 'FAIL denied subject was accepted' >&2; exit 1

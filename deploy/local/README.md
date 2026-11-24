@@ -174,7 +174,8 @@ and uses an eight-second lease so the expiry demonstration takes seconds rather 
 ```bash
 deploy/local/lab.sh close           # release any PR-held lock first
 deploy/local/lab.sh run             # --check --diff by default
-deploy/local/lab.sh run-apply       # explicit apply; then inspect `lab.sh motd`
+deploy/local/lab.sh run-apply       # explicit apply of main (an apply must name the default-branch head); then `lab.sh motd`
+deploy/local/lab.sh run-apply-unmerged # apply of the PR branch: must fail with 409
 deploy/local/lab.sh run-denied      # valid RS256 identity, unauthorized subject; must fail
 deploy/local/lab.sh run-contention  # CLI lease refuses PR apply; PR lock refuses CLI
 deploy/local/lab.sh run-expiry      # SIGKILL CLI; after 10s another CLI acquires and finishes
