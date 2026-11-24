@@ -123,12 +123,39 @@ Do not break these. If a task seems to require it, stop and ask.
 25. Unknown `ferry.yaml` keys are an error. Adding a key changes the config digest, which
     invalidates existing plans. That is expected. Say so in the changelog.
 
+## Changelog
+
+`CHANGELOG.md` is written for the people who run ferry, not for the people who wrote it. Each
+entry should tell an operator what changed for them and whether they need to do anything.
+
+- **Every user-visible change gets an entry in the same pull request.** Features, behaviour
+  changes, fixes, security fixes, new or changed flags, config keys, env vars, endpoints and
+  metrics all count. Refactors, test-only and CI-only changes don't, unless they change behaviour.
+- **Add entries under `## [Unreleased]` at the top.** Create that heading if it isn't there.
+  A release renames it to `## [X.Y.Z] - YYYY-MM-DD` and adds the compare link (see
+  [docs/development.md](docs/development.md)).
+- **Group entries under `### Security`, `### Added`, `### Changed`, `### Deprecated`,
+  `### Removed` and `### Fixed`**, in that order, and leave out empty groups.
+- **Lead with the effect, in bold, and end with the issue or PR number:** "**A separate signing
+  role for CLI certificates** (#69): ...". Then one or two sentences on what it means in practice,
+  naming the exact flag, key or endpoint.
+- **Spell out the upgrade impact.** If an operator has to do something (change config, re-plan,
+  rotate a credential, change a CI pin), say so in the entry. Anything that breaks existing
+  setups goes first in its group and starts with "**Breaking:**".
+- **Security fixes say who is affected and what to do:** which versions, which setups, and
+  "upgrade" or the workaround. Credit the reporter if they want it.
+- **A release can open with a short paragraph** explaining the headline change before the
+  groups, as 0.4.0 does.
+- **Don't edit a published release's section** except to correct a fact. Never re-tag a
+  published version; ship the fix in the next patch release instead.
+- Same public-repo rule as everywhere else: no real hostnames, addresses, organisations or names.
+
 ## Working rules
 
 - Add or change a test with every behaviour change. Both backends get every service change.
 - When you add a flag, variable, config key, endpoint or metric: update
   [docs/configuration.md](docs/configuration.md), the topic page under `docs/`, and
-  `CHANGELOG.md` under "Unreleased".
+  `CHANGELOG.md` under "Unreleased" (see [Changelog](#changelog)).
 - Document only what exists in the code. Grep before you write it down.
 - This is a public repository. Use `example.com` and example values. No real hostnames, addresses,
   organization names or people's names in code, docs, tests, commits or pull request text.
