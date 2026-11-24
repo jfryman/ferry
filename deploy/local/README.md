@@ -109,7 +109,7 @@ The playbooks run in a separate container, `ferry-lab-executor`: user `ferry-run
   ```
   curl -s localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":2}}]}'
   ```
-- **Duplicate deliveries and bad signatures:** re-send a body with the same `X-GitHub-Delivery`, or with a wrong `X-Hub-Signature-256` (expect 401).
+- **Duplicate deliveries and bad signatures:** re-send a body with the same `X-GitHub-Delivery`, or the same body under a new one (both: `duplicate delivery`), or with a wrong `X-Hub-Signature-256` (expect 401).
 - **Drift:** add `-e FERRY_DRIFT_INTERVAL_HOURS=0.01` to the ferry container in `up.sh`. Drift runs on `main` and writes `ansible_drift.prom` on the target, if it has a textfile dir.
 
 To change ferry and re-test: edit `src/ferry/...`, then `python -m pytest -q`, then `deploy/local/up.sh` (it rebuilds the image), then walk the loop. `lab.sh logs` shows ferry's log, including the full ansible output.

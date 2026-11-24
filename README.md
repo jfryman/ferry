@@ -141,6 +141,14 @@ sequenceDiagram
   workload identity, a throwaway ed25519 key signed by OpenBao's SSH CA, and the ansible-vault
   password; all removed and the token revoked when the job ends.
 - **Locks** in the service's SQLite file (`FERRY_LOCK_DB`) on persistent storage; one instance.
+  The same file remembers seen deliveries. Losing it frees every lock.
+- **Replays:** a delivery is a duplicate if its id *or* its exact signed body was seen before
+  (the delivery id isn't covered by the signature), remembered in the state file for 7 days, across
+  restarts. Events whose own timestamps (a comment's `created_at`/`updated_at`, a PR's
+  `updated_at`) are older than `FERRY_WEBHOOK_MAX_AGE_MINUTES` (10) are refused, so a captured
+  body can't be replayed later under a new id.
+- **HTTP:** bodies over `FERRY_MAX_BODY_BYTES` (1 MiB) get 413, chunked bodies 411; a connection
+  that stalls is dropped after 15 s, and at most 32 are served at once.
 - **Drift** every `FERRY_DRIFT_INTERVAL_HOURS` on the default branch.
 - `GET /healthz` reports the queue and the last job. Settings: `ferry serve --help`.
 
@@ -186,7 +194,8 @@ Webhook (project **Settings > Webhooks**): URL `https://ferry.example.com/webhoo
 token**, triggers **Merge request events** and **Comments**, **Enable SSL verification** on. GitLab
 doesn't sign the body; it sends the secret in `X-Gitlab-Token`, which ferry compares in constant
 time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (or
-`X-Gitlab-Event-UUID`); deliveries for another project are ignored.
+`X-Gitlab-Event-UUID`) and on the body, in the state file; notes and MR events older than
+`FERRY_WEBHOOK_MAX_AGE_MINUTES` are refused; deliveries for another project are ignored.
 
 - **Plan** on open, reopen, a push of new commits and draft -> ready, under the same plan rule:
   automatically only for MR authors with Developer+; anyone else's MR gets one note and waits for

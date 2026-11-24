@@ -11,7 +11,9 @@ Events (one project webhook, "Merge request events" + "Comments", with a secret 
 
 GitLab doesn't sign the body: it sends the secret itself in X-Gitlab-Token, compared here in
 constant time. Keep SSL verification on in the webhook so the secret only travels over TLS.
-Deliveries are deduped on Idempotency-Key (stable across GitLab's retries), else X-Gitlab-Event-UUID.
+Deliveries are deduped on Idempotency-Key (stable across GitLab's retries), else X-Gitlab-Event-UUID,
+and on a digest of the body, in the state file (so across restarts too). Events whose own timestamps
+(the note's created_at/updated_at, the MR's updated_at) are older than max_event_age_minutes are refused.
 
 Plan rule as on GitHub, with Developer+ for "write access": the MR author's Developer access decides
 auto-plan; anyone else's MR waits for `/ferry plan` from a Developer. Draft and fork MRs (source
@@ -22,7 +24,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import threading
 
 from .service import Job, Service
 from .webhook import COMMAND_RE
@@ -50,10 +51,6 @@ class GitLabService(Service):
     noun = "MR"
     access = "Developer access"
 
-    def __post_init__(self):
-        super().__post_init__()
-        self._dedupe_lock = threading.Lock()
-
     def handle_request(self, headers, body: bytes) -> tuple[int, str]:
         delivery = headers.get("Idempotency-Key") or headers.get("X-Gitlab-Event-UUID") or ""
         return self.handle(headers.get("X-Gitlab-Event", ""), delivery, headers.get("X-Gitlab-Token"), body)
@@ -61,8 +58,9 @@ class GitLabService(Service):
     def handle(self, event: str, delivery: str, token: str | None, body: bytes) -> tuple[int, str]:
         if not verify_token(self.secret, token):
             return 401, "bad token"
-        if self._duplicate(delivery):
-            return 200, "duplicate delivery"
+        return self._deduped(delivery, body, lambda: self._dispatch(event, delivery, body))
+
+    def _dispatch(self, event: str, delivery: str, body: bytes) -> tuple[int, str]:
         try:
             payload = json.loads(body)
         except ValueError:
@@ -75,17 +73,6 @@ class GitLabService(Service):
             return self._on_note(payload, delivery)
         return 202, f"ignored event {event}"
 
-    def _duplicate(self, delivery: str) -> bool:
-        if not delivery:
-            return False
-        with self._dedupe_lock:
-            if delivery in self._seen:
-                return True
-            self._seen[delivery] = None
-            while len(self._seen) > 1000:
-                self._seen.popitem(last=False)
-        return False
-
     def _our_project(self, project: dict) -> bool:
         path = str(project.get("path_with_namespace") or "")
         if path and path.lower() == self.settings.repo.lower():
@@ -96,6 +83,10 @@ class GitLabService(Service):
     def _on_merge_request(self, p: dict, delivery: str) -> tuple[int, str]:
         mr = p.get("object_attributes") or {}
         action, iid = mr.get("action"), int(mr["iid"])
+        # Every action, close included: a replayed close would release an open MR's locks.
+        stale = self._stale(mr.get("updated_at"))
+        if stale:
+            return 202, stale
         sha = (mr.get("last_commit") or {}).get("id", "")
         if action in MR_CLOSE_ACTIONS:
             return self._enqueue(Job("unlock", iid, sha, delivery=delivery))
@@ -130,6 +121,9 @@ class GitLabService(Service):
         m = COMMAND_RE.match(text.splitlines()[0]) if text else None
         if not m or not text.startswith("/ferry"):
             return 202, "not a ferry command"
+        stale = self._stale(note.get("created_at"), note.get("updated_at"))
+        if stale:
+            return 202, stale
         action, inventory = m.group(1), m.group(2)
         iid = int(p["merge_request"]["iid"])
         # Both commands need Developer access, checked here: a refused request never costs a checkout
