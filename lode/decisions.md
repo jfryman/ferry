@@ -165,3 +165,9 @@ The image sets `ANSIBLE_HOST_KEY_CHECKING=True`: without it, anything answering 
 receives an apply's payload, including values decrypted with the vault password. Deployments mount
 known_hosts at `/etc/ssh/ssh_known_hosts` (pinned keys or `@cert-authority`). The local lab turns it
 off for its throwaway target.
+
+## Retry the code host at startup
+`ferry serve` reads the App/bot identity at start so a wrong credential fails fast. Under an
+orchestrator, DNS or the network often isn't ready yet, and exiting then just waits for a restart
+(the local lab hit it under podman). Transient failures (unreachable, 5xx) are retried with backoff
+(`FERRY_STARTUP_ATTEMPTS`, default 8); a 4xx (bad token, wrong repo) still exits at once.

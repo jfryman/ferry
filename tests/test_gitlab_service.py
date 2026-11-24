@@ -348,3 +348,32 @@ def test_build_gitlab_service_from_env(tmp_path, monkeypatch):
     assert svc.workspace.remote == "https://gitlab.example.com/acme/ansible.git"
     assert svc.workspace.git_user == "oauth2" and svc.workspace._tok() == "tok"
     assert svc.vcs.pipeline_blocks and fake.calls[0][1] == f"{API}/projects/acme%2Fansible"
+
+
+def test_serve_startup_retries_while_the_code_host_is_unreachable(monkeypatch):
+    import urllib.error
+
+    from ferry import cli
+    from ferry.vcs.gitlab import GitLabError
+
+    calls, waits = [], []
+
+    def flaky(vcs=None):
+        calls.append(vcs)
+        if len(calls) < 3:
+            raise urllib.error.URLError("Temporary failure in name resolution")
+        return "svc"
+
+    monkeypatch.setattr(cli, "build_service", flaky)
+    assert cli.build_service_with_retry(attempts=5, sleep=waits.append) == "svc"
+    assert len(calls) == 3 and waits == [1.0, 2.0]
+
+    def unauthorized(vcs=None):  # a wrong token is not transient: fail at once
+        calls.append(vcs)
+        raise GitLabError(401, "GET", "/user", "unauthorized")
+
+    calls.clear()
+    monkeypatch.setattr(cli, "build_service", unauthorized)
+    with pytest.raises(GitLabError):
+        cli.build_service_with_retry(attempts=5, sleep=waits.append)
+    assert len(calls) == 1

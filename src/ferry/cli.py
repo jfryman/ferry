@@ -116,6 +116,7 @@ SERVE_HELP = """Run ferry as an Atlantis-style service. Settings come from the e
   FERRY_LISTEN                   host:port, default 0.0.0.0:8080 (POST /webhook, GET /healthz)
   FERRY_SSH_USER                 remote user for ansible (e.g. root)
   FERRY_DRIFT_INTERVAL_HOURS     0 (default) disables scheduled drift runs
+  FERRY_STARTUP_ATTEMPTS         8 (default): tries to reach the code host at start, with backoff
 
   GitHub App:
   FERRY_GITHUB_REPO              OWNER/NAME of the config repo (required)
@@ -178,6 +179,41 @@ def _secret_file_or_env(file_var: str, env_var: str):
         return lambda: path.read_text().strip()
     value = _env(env_var)
     return (lambda: value) if value else None
+
+
+def _transient(e: BaseException) -> bool:
+    """A startup failure worth retrying: the code host (or DNS) isn't reachable yet, or it answered 5xx."""
+    import urllib.error
+
+    from .vcs.gitlab import GitLabError
+    from .vcs.github import GitHubError
+
+    if isinstance(e, (GitHubError, GitLabError)):
+        return e.status >= 500
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code >= 500
+    return isinstance(e, (urllib.error.URLError, ConnectionError, TimeoutError))
+
+
+def build_service_with_retry(vcs: str | None = None, attempts: int | None = None, sleep=None):
+    """build_service, retried with backoff while the code host is unreachable (container DNS or the
+    network often lags at start under an orchestrator). Config errors still exit at once."""
+    import logging
+    import time
+
+    attempts = attempts or int(_env("FERRY_STARTUP_ATTEMPTS", "8"))
+    sleep = sleep or time.sleep
+    delay = 1.0
+    for i in range(1, attempts + 1):
+        try:
+            return build_service(vcs)
+        except Exception as e:  # noqa: BLE001 - filtered by _transient
+            if i == attempts or not _transient(e):
+                raise
+            logging.getLogger("ferry.serve").warning("startup attempt %d/%d failed (%s); retrying in %.0fs",
+                                                     i, attempts, e, delay)
+            sleep(delay)
+            delay = min(delay * 2, 30.0)
 
 
 def build_service(vcs: str | None = None):
@@ -345,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         from .service import serve
         host, _, port = (_env("FERRY_LISTEN", "0.0.0.0:8080")).rpartition(":")
-        serve(build_service(args.vcs), host or "0.0.0.0", int(port))
+        serve(build_service_with_retry(args.vcs), host or "0.0.0.0", int(port))
         return 0
 
     if args.cmd in ("scope", "policy"):
