@@ -505,3 +505,57 @@ def test_unknown_contributors_refuse(env, error):
     out, runner = contributed(env, error, ["carol"])
     assert not out.ok and runner.requests == []
     assert any("couldn't tell who pushed" in r for r in out.reasons)
+
+
+# ---- #27: per-inventory apply rules; require_inventory ----------------------------------------------
+
+def two_inventories(repo, extra=""):
+    (repo / "inventories/prod").mkdir(parents=True, exist_ok=True)
+    (repo / "inventories/prod/hosts.yml").write_text("all: {hosts: {db-1: {}}}\n")
+    (repo / "ferry.yaml").write_text(
+        "inventories:\n  - {name: homelab, path: inventories/homelab}\n"
+        "  - name: prod\n    path: inventories/prod\n" + extra
+        + "policy:\n  check_mode_false_allow: ['roles/printer_guard/**']\n")
+    return config.load(repo / "ferry.yaml")
+
+
+def test_per_inventory_allowed_users(repo):
+    cfg = two_inventories(repo, "    apply: {allowed_users: [james]}\n")
+    assert cfg.apply_for("prod").allowed_users == ["james"]
+    assert cfg.apply_for("homelab").allowed_users == []
+    vcs = FakeVCS()
+    vcs.developers |= {"carol"}
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml", "inventories/prod/host_vars/db-1.yml"])
+    vcs.approvals[1] = ["james"]
+    red = Redactor([], [], [], environ={})
+    locks = MemoryLocks()
+    for inv in ("homelab", "prod"):
+        assert Engine(cfg, repo, FakeRunner(clean_plan_run()), vcs, locks, red, Clock()).plan(1, SHA, "pip", inv).ok
+    ok = Engine(cfg, repo, FakeRunner(clean_plan_run()), vcs, locks, red, Clock()).apply(1, SHA, "carol", "homelab")
+    assert ok.ok, ok.reasons
+    refused = Engine(cfg, repo, FakeRunner(), vcs, locks, red, Clock()).apply(1, SHA, "carol", "prod")
+    assert not refused.ok and any("`carol` is not in apply.allowed_users for `prod`" in r for r in refused.reasons)
+
+
+def test_per_inventory_min_approvals_and_the_digest(repo):
+    a = two_inventories(repo)
+    b = two_inventories(repo, "    apply: {min_approvals: 2}\n")
+    assert b.apply_for("prod").min_approvals == 2 and b.apply_for("homelab").min_approvals == 1
+    assert a.digest() != b.digest()
+
+
+@pytest.mark.parametrize("bad", ["    apply: {require_clean_plan: false}\n", "    apply: {min_approvals: -1}\n",
+                                 "    apply: {allowed_users: carol}\n", "    apply: [x]\n"])
+def test_per_inventory_overrides_are_limited(repo, bad):
+    with pytest.raises(ValueError, match="apply"):
+        two_inventories(repo, bad)
+
+
+def test_require_inventory_refuses_a_bare_apply_with_several_inventories(repo):
+    cfg = two_inventories(repo, "apply: {require_inventory: true}\n")
+    vcs = FakeVCS()
+    vcs.add_cr(1, SHA, files=["inventories/homelab/host_vars/dns-1.yml"])
+    runner = FakeRunner()
+    out = Engine(cfg, repo, runner, vcs, MemoryLocks(), Redactor([], [], [], environ={}), Clock()).apply(1, SHA, "james")
+    assert not out.ok and runner.requests == []
+    assert any("`homelab`, `prod`" in r for r in out.reasons)

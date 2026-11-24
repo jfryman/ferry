@@ -208,6 +208,7 @@ class Engine:
     def apply_checks(self, cr_id: int, sha: str, user: str, inventory: str) -> tuple[list[str], dict | None]:
         assert self.vcs is not None
         reasons: list[str] = []
+        rules = self.cfg.apply_for(inventory)  # top-level apply rules plus this inventory's overrides
         cr = self.vcs.get_change_request(cr_id)
         if not cr.open:
             reasons.append(f"MR is {cr.state}")
@@ -238,7 +239,7 @@ class Engine:
         # Nor does one from someone who wrote part of the change (#25): authored, committed or pushed
         # commits in it. allow_author_approval is the one opt-out, for solo repos.
         bot = self.vcs.bot_username()
-        solo = self.cfg.apply.allow_author_approval
+        solo = rules.allow_author_approval
         contributors: set[str] = set()
         if not solo:
             try:
@@ -257,18 +258,19 @@ class Engine:
                     excluded.append(a)
                 continue
             approvers.append(a)
-        if len(approvers) < self.cfg.apply.min_approvals:
+        if len(approvers) < rules.min_approvals:
             reasons.append(
-                f"needs {self.cfg.apply.min_approvals} approval(s)"
+                f"needs {rules.min_approvals} approval(s)"
                 + ("" if solo else " from someone other than the author and anyone who pushed to it")
                 + " with write access (Developer+ on GitLab)"
                 + f", has {len(approvers)}"
             )
             for a in excluded:
                 reasons.append(f"the approval from `{a}` doesn't count: `{a}` pushed or authored commits in this MR")
-        allowed = self.cfg.apply.allowed_users
+        allowed = rules.allowed_users
         if allowed and user not in allowed:
-            reasons.append(f"`{user}` is not in apply.allowed_users")
+            reasons.append(f"`{user}` is not in apply.allowed_users"
+                           + (f" for `{inventory}`" if self.cfg.inventory(inventory).apply.get("allowed_users") else ""))
         # Both checks: being listed doesn't outlive losing access to the repo.
         if not self.vcs.can_apply(user):
             reasons.append(f"`{user}` may not apply here (needs Developer+ on GitLab, write on GitHub)")
@@ -281,11 +283,11 @@ class Engine:
                 reasons.append(f"latest plan is for `{str(plan.get('sha'))[:8]}`, not the MR head `{cr.head_sha[:8]}`: re-run the plan")
             if plan.get("config") != self.cfg.digest():
                 reasons.append("ferry.yaml changed since the plan: re-run the plan")
-            if self.cfg.apply.require_clean_plan and not plan.get("clean"):
+            if rules.require_clean_plan and not plan.get("clean"):
                 reasons.append("latest plan was not clean (failed, unreachable or blocked hosts)")
             age_h = (self.clock() - float(plan.get("at", 0))) / 3600
-            if age_h > self.cfg.apply.max_plan_age_hours:
-                reasons.append(f"latest plan is {age_h:.1f}h old (max {self.cfg.apply.max_plan_age_hours}h): re-run the plan")
+            if age_h > rules.max_plan_age_hours:
+                reasons.append(f"latest plan is {age_h:.1f}h old (max {rules.max_plan_age_hours}h): re-run the plan")
         return reasons, plan
 
     def _apply_blockers(self, cr_id: int, sha: str, user: str, inventory: str) -> tuple[list[str], dict | None]:
@@ -302,16 +304,29 @@ class Engine:
                 reasons.append("scope differs from the plan's: re-run the plan")
         return reasons, plan
 
+    def bare_apply_reason(self, inventory: str | None) -> str | None:
+        """apply.require_inventory: with several inventories, each must be named (#27)."""
+        if inventory is None and self.cfg.apply.require_inventory and len(self.cfg.inventories) > 1:
+            names = ", ".join(f"`{i.name}`" for i in self.cfg.inventories)
+            return f"name the inventory to apply (apply.require_inventory): one of {names}"
+        return None
+
     def apply_precheck(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome | None:
         """The apply gates alone, before anything is spent on the run (credentials, a certificate):
         the refusal (posted, as apply would) if any gate fails, else None. apply() checks again."""
         inv = self.cfg.inventory(inventory)
+        bare = self.bare_apply_reason(inventory)
+        if bare:
+            return self._refuse("apply", cr_id, inv.name, sha, [bare])
         reasons, _ = self._apply_blockers(cr_id, sha, user, inv.name)
         return self._refuse("apply", cr_id, inv.name, sha, reasons) if reasons else None
 
     def apply(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome:
         assert self.vcs is not None
         inv = self.cfg.inventory(inventory)
+        bare = self.bare_apply_reason(inventory)
+        if bare:
+            return self._refuse("apply", cr_id, inv.name, sha, [bare])
         reasons, plan = self._apply_blockers(cr_id, sha, user, inv.name)
         if reasons:
             return self._refuse("apply", cr_id, inv.name, sha, reasons)

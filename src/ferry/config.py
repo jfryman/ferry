@@ -15,10 +15,16 @@ from pathlib import Path
 import yaml
 
 
+# What an inventory may override from the top-level `apply` (#27): who may apply it, how many approvals.
+INVENTORY_APPLY_KEYS = ("allowed_users", "min_approvals")
+
+
 @dataclass
 class InventoryConfig:
     name: str
     path: str  # directory (or file) relative to the repo root, passed to ansible -i
+    # Overrides of the top-level apply rules for this inventory: allowed_users, min_approvals.
+    apply: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -75,6 +81,8 @@ class ApplyConfig:
     # Refuse to apply a PR that is behind its base branch (Atlantis `undiverged`): ansible applies
     # whole roles, so a stale branch would put the hosts back to what the base had before.
     require_up_to_date: bool = True
+    # With several inventories, a bare apply (no inventory named) is refused: name each one.
+    require_inventory: bool = False
 
 
 @dataclass
@@ -137,6 +145,13 @@ class Config:
                 return inv
         raise KeyError(f"unknown inventory {name!r}; known: {[i.name for i in self.inventories]}")
 
+    def apply_for(self, inventory: str | None) -> ApplyConfig:
+        """The apply rules for one inventory: the top-level ones with its overrides."""
+        inv = self.inventory(inventory)
+        if not inv.apply:
+            return self.apply
+        return ApplyConfig(**{**asdict(self.apply), **inv.apply})
+
     def digest(self) -> str:
         """Stable hash: a plan made under one config is not valid for an apply under another."""
         blob = json.dumps(asdict(self), sort_keys=True).encode()
@@ -151,6 +166,21 @@ def _merge(cls, data: dict | None):
             raise ValueError(f"{cls.__name__}: unknown key {key!r}")
         setattr(obj, key, value)
     return obj
+
+
+def _check_inventory_apply(inv: InventoryConfig) -> None:
+    where = f"ferry.yaml: inventory {inv.name!r}: apply"
+    if not isinstance(inv.apply, dict):
+        raise ValueError(f"{where} must be a mapping")
+    for key, value in inv.apply.items():
+        if key not in INVENTORY_APPLY_KEYS:
+            raise ValueError(f"{where}: only {', '.join(INVENTORY_APPLY_KEYS)} can be set per inventory, not {key!r}")
+    users = inv.apply.get("allowed_users", [])
+    if not isinstance(users, list) or not all(isinstance(u, str) and u for u in users):
+        raise ValueError(f"{where}: allowed_users must be a list of usernames")
+    n = inv.apply.get("min_approvals", 0)
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise ValueError(f"{where}: min_approvals must be a whole number >= 0")
 
 
 def load(path: str | Path) -> Config:
@@ -170,6 +200,8 @@ def load(path: str | Path) -> Config:
             raise ValueError(f"ferry.yaml: unknown key {key!r}")
     if not cfg.inventories:
         raise ValueError("ferry.yaml: at least one inventory is required")
+    for inv in cfg.inventories:
+        _check_inventory_apply(inv)
     if not isinstance(cfg.base_branches, list) or not all(isinstance(b, str) and b for b in cfg.base_branches):
         raise ValueError("ferry.yaml: base_branches must be a list of branch names")
     return cfg

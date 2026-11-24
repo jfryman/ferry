@@ -63,6 +63,20 @@ All re-checked inside the apply job, against live GitLab state:
   `allow_author_approval: true` is the one opt-out, for solo repos. If the code host can't say who
   pushed, no approval counts. Only approvals from users who could apply themselves count (write on GitHub, Developer+ on GitLab), and ferry's own account never does: on a public GitHub repo anyone can leave an approving review.
 - The person running it has Developer+ (or is in `apply.allowed_users`).
+- Several inventories: a bare apply applies them in `ferry.yaml` order and **stops at the first one
+  that is refused or doesn't apply cleanly**; the rest are listed as not run.
+  `apply.require_inventory: true` refuses a bare apply outright (name each inventory). An inventory
+  may override `allowed_users` and `min_approvals` for itself:
+
+  ```yaml
+  inventories:
+    - {name: staging, path: inventories/staging}
+    - name: production
+      path: inventories/production
+      apply: {allowed_users: [alice, bob], min_approvals: 2}
+  apply:
+    require_inventory: true
+  ```
 - **GitHub: the code host's own rules would allow the merge**, on top of ferry's approval check
   (both must pass). See [GitHub branch protection and rulesets](#github-branch-protection-and-rulesets).
 - The MR holds the inventory lock (or the lock is free / its holder MR is closed or merged).

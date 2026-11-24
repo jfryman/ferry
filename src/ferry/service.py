@@ -534,18 +534,25 @@ class Service:
         try:
             env = self._collections(checkout)
             invs = [job.inventory] if job.inventory else [i.name for i in cfg.inventories]
-            outcomes = {}
+            outcomes: dict = {}
+            culprit, why = None, ""
             if job.action == "apply":
                 # Every apply gate first, without credentials: a refused apply (no approval, a stale
                 # plan) costs no OpenBao login and no certificate. apply() checks again with them.
                 pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
                              clock=self.clock, default_branch=self.settings.default_branch,
                              marker_key=self.marker_key(), pushers=self.state.pushers)
+                bare = pre.bare_apply_reason(job.inventory)
+                if bare:  # apply.require_inventory (#27): nothing runs, not even the first one
+                    out = pre.apply_precheck(job.pr, job.sha, job.user, None)
+                    return {"ok": False, "inventories": {"*": {"ok": False, "reasons": out.reasons}}}
                 for inv in invs:
                     out = pre.apply_precheck(job.pr, job.sha, job.user, inv)
                     if out is not None:
                         outcomes[inv] = {"ok": False, "reasons": out.reasons}
-            todo = [inv for inv in invs if inv not in outcomes]
+                        culprit, why = inv, "was refused"
+                        break  # in order: what comes after a refused inventory doesn't run (#27)
+            todo = invs[: invs.index(culprit)] if culprit else list(invs)
             if todo:
                 with job_credentials(self.bao, self.settings.ssh_user) as creds:
                     eng = self._engine(cfg, checkout, {**env, **creds})
@@ -553,6 +560,18 @@ class Service:
                         out = eng.plan(job.pr, job.sha, job.user, inv) if job.action == "plan" else \
                             eng.apply(job.pr, job.sha, job.user, inv)
                         outcomes[inv] = {"ok": out.ok, "reasons": out.reasons}
+                        if job.action == "apply" and not out.ok:
+                            culprit, why = inv, "didn't apply cleanly" if out.run is not None else "was refused"
+                            break  # a half-applied staging doesn't go on to production (#27)
+            skipped = [inv for inv in invs if inv not in outcomes]
+            for inv in skipped:
+                outcomes[inv] = {"ok": False, "reasons": [f"not run: `{culprit}` {why}"]}
+            if skipped:
+                names = ", ".join(f"`{i}`" for i in skipped)
+                self.vcs.post_note(job.pr, (
+                    f"### ferry apply: {names} not run\n\n`{culprit}` {why}, and ferry stops at the first "
+                    f"inventory that doesn't apply. Nothing ran against {names}. Fix `{culprit}`, then apply "
+                    "again, or name an inventory: " + ", ".join(f"`/ferry apply {i}`" for i in skipped) + "."))
             return {"ok": all(o["ok"] for o in outcomes.values()),
                     "inventories": {inv: outcomes[inv] for inv in invs}}
         finally:

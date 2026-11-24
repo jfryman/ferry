@@ -766,3 +766,25 @@ def test_gitlab_service_installs_collections_in_the_executor(world, monkeypatch,
     assert world.svc._collections(co)["ANSIBLE_COLLECTIONS_PATH"].startswith("/x") and asked == [co]
     world.svc.settings.galaxy = "skip"
     assert world.svc._collections(co) == {} and len(asked) == 1
+
+
+# ---- #27 on GitLab ----------------------------------------------------------------------------------
+
+def test_require_inventory_on_gitlab(repo, tmp_path, monkeypatch):
+    from test_service import count_credentials
+    (repo / "inventories/prod").mkdir(parents=True, exist_ok=True)
+    (repo / "inventories/prod/hosts.yml").write_text("all: {hosts: {ntp-1: {}}}\n")
+    (repo / "ferry.yaml").write_text(
+        "inventories:\n  - {name: homelab, path: inventories/homelab}\n  - {name: prod, path: inventories/prod}\n"
+        "policy:\n  check_mode_false_allow: ['roles/printer_guard/**']\n"
+        "apply:\n  require_inventory: true\n")
+    w = World(repo, tmp_path / "w", runs=(clean_run(), clean_run(), clean_run()))
+    w.deliver("Note Hook", w.note_event("/ferry plan"))
+    w.drain()
+    w.approved_by = [{"user": {"username": "alice"}, "approved_at": APPROVED_AFTER_HEAD}]
+    minted = count_credentials(monkeypatch)
+    result, _ = apply_reasons(w, "inv-1")
+    assert not result["ok"] and not minted and "`homelab`, `prod`" in w.notes[-1]["body"]
+    w.deliver("Note Hook", w.note_event("/ferry apply homelab"), delivery="inv-2")
+    [ok] = w.drain()
+    assert ok["ok"], ok
