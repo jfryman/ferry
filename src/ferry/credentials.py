@@ -95,10 +95,10 @@ class OpenBao:
         auth = self._call("POST", f"auth/{self.s.auth_mount}/login", data={"role": self.s.auth_role, "jwt": jwt})
         return auth["auth"]["client_token"]
 
-    def sign_ssh_key(self, token: str, public_key: str) -> str:
+    def sign_ssh_key(self, token: str, public_key: str, ttl: str | None = None) -> str:
         req = {"public_key": public_key, "cert_type": "user"}
-        if self.s.ssh_ttl:
-            req["ttl"] = self.s.ssh_ttl
+        if ttl or self.s.ssh_ttl:
+            req["ttl"] = ttl or self.s.ssh_ttl
         if self.s.ssh_principal:
             req["valid_principals"] = self.s.ssh_principal
         data = self._call("POST", f"{self.s.ssh_mount}/sign/{self.s.ssh_role}", token, req)

@@ -550,6 +550,10 @@ An automatic local recovery cannot safely infer that from the service PID alone.
 refuses **all new CLI runs, including check**. It does not revoke already-issued credentials. A PR lock refuses a run; a run lock refuses a PR.
 `FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
 actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
+`FERRY_RUN_CERT_TTL` (default `15m`) is the TTL the service asks OpenBao for on CLI certificates,
+which is also the longest a CLI run can last. A certificate that comes back longer than that (plus 60 s)
+is refused. The certificate is not scoped to the locked inventory: it is valid wherever the signing
+role's principal is trusted, until it expires. Keep the TTL short and the principal narrow.
 `FERRY_RUN_NAME_CLAIM` selects a signed display-name claim (default `name`). The service strips
 Unicode control/format characters, collapses whitespace and bounds it to 128 characters; missing,
 non-string or empty names fall back to `sub`. Authorization and run ownership always use stable

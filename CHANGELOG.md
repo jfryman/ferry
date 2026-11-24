@@ -11,6 +11,8 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   streams and reject non-standard JSON NumericDates.
 - Operator hardening: apply disable gates both client-chosen modes; safe configurable display
   identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
+- CLI certificates ask OpenBao for a short TTL (`FERRY_RUN_CERT_TTL`, default 15m) and are
+  refused if they come back longer (#53).
 - `ferry run --apply` must name the default-branch head (409 otherwise); empty allow-list
   entries and empty group claims never match.
 

@@ -43,6 +43,14 @@ def certificate_details(cert):
     return str(serial), end
 
 
+def duration_seconds(value):
+    """'15m', '900s', '1h' or a bare number of seconds -> seconds (positive)."""
+    m = re.fullmatch(r'\s*(\d+)\s*([smh]?)\s*', str(value))
+    if not m or int(m[1]) <= 0:
+        raise ValueError(f'invalid duration {value!r}')
+    return int(m[1]) * {'': 1, 's': 1, 'm': 60, 'h': 3600}[m[2]]
+
+
 class RunError(ValueError):
     def __init__(self, status, text):
         self.status, self.text = status, text
@@ -231,10 +239,15 @@ class Runs:
             token = svc.bao.login()
             if svc._disabled('apply'):
                 raise RunError(403, 'CLI runs disabled while applies are disabled: check/apply is client-chosen')
-            cert = svc.bao.sign_ssh_key(token, pub)
+            # CLI certificates leave the service: ask for a short TTL (#53), and refuse one that
+            # came back longer than asked (a role default or misconfiguration), 60 s for skew.
+            ttl = svc.settings.run_cert_ttl
+            cert = svc.bao.sign_ssh_key(token, pub, ttl=ttl)
             serial, expires = certificate_details(cert)
             if expires <= svc.clock():
                 raise ValueError('certificate expired')
+            if expires > svc.clock() + duration_seconds(ttl) + 60:
+                raise ValueError('certificate longer than run_cert_ttl')
             password = svc.bao.read_field(token, svc.bao.s.vault_password_path, svc.bao.s.vault_password_field) \
                        if svc.bao.s.vault_password_path else ''
             svc.bao.revoke(token)
