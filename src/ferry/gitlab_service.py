@@ -30,7 +30,7 @@ import json
 import logging
 
 from .service import Job, Service, _valid_id, parse_time
-from .webhook import COMMAND_RE
+from .webhook import classify_command
 
 log = logging.getLogger("ferry.gitlab_service")
 
@@ -128,16 +128,22 @@ class GitLabService(Service):
         if user == self.vcs.bot_username():
             return 202, "own comment"
         text = (note.get("note") or "").strip()
-        m = COMMAND_RE.match(text.splitlines()[0]) if text else None
-        if not m or not text.startswith("/ferry"):
+        parsed = classify_command(text)
+        if parsed is None:  # only notes starting with /ferry are ferry's business
             return 202, "not a ferry command"
+        kind, m = parsed
         stale = self._stale(note.get("created_at"), note.get("updated_at"))
         if stale:
             return 202, stale
         if not _valid_id(note.get("id")):
             return 400, "note id missing or malformed"
         project = (p.get("project") or {}).get("id") or self.settings.project_id or self.settings.repo.lower()
-        return self._once(self._comment_key("note", project, note["id"]), lambda: self._on_note_command(p, m, delivery))
+        if kind == "run":
+            dispatch = lambda: self._on_note_command(p, m, delivery)  # noqa: E731
+        else:
+            dispatch = lambda: self._on_other_command(  # noqa: E731
+                int(p["merge_request"]["iid"]), user, kind, m, text.splitlines()[0], delivery)
+        return self._once(self._comment_key("note", project, note["id"]), dispatch)
 
     def _on_note_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
         note = p["object_attributes"]
