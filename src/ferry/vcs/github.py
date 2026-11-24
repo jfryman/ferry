@@ -188,6 +188,10 @@ class GitHubBackend:
             return True
         if slug and ctx.app_slug == slug:
             return True
+        # GraphQL names an App's status creator by its slug (`ferry-acme`, __typename Bot); REST and
+        # older fixtures use `ferry-acme[bot]`. Only a Bot may match the slug: a user can hold that login.
+        if slug and ctx.creator_is_bot and ctx.creator == slug:
+            return True
         return bool(bot) and ctx.creator == bot
 
     def _requirements(self, branch: str) -> protection.Requirements:
@@ -267,6 +271,14 @@ class GitHubBackend:
                 if login and login != "web-flow":
                     out.add(login)
         return out
+
+    def set_status(self, sha: str, name: str, state: str, description: str, url: str | None = None) -> None:
+        """A commit status (needs the App's "Commit statuses: write"). GitHub has no "running"."""
+        data = {"state": {"running": "pending"}.get(state, state), "context": name,
+                "description": description[:140]}
+        if url:
+            data["target_url"] = url
+        self.client.request("POST", f"{self._r}/statuses/{sha}", data=data)
 
     def changed_files(self, cr_id: int) -> list[str]:
         files: set[str] = set()

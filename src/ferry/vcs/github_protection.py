@@ -56,7 +56,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           __typename
           ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number)
                             checkSuite { app { slug databaseId } } }
-          ... on StatusContext { context state isRequired(pullRequestNumber: $number) creator { login } }
+          ... on StatusContext { context state isRequired(pullRequestNumber: $number) creator { __typename login } }
         }
       } } } } }
     }
@@ -156,6 +156,7 @@ class Context:
     app_slug: str | None = None
     app_id: int | None = None
     creator: str | None = None
+    creator_is_bot: bool = False  # GraphQL __typename Bot: an App, whose login is its slug (no [bot])
 
     @property
     def passing(self) -> bool:
@@ -176,7 +177,8 @@ def contexts(pr: dict) -> tuple[list[Context], bool]:
                                app_slug=app.get("slug"), app_id=app.get("databaseId")))
         elif n.get("__typename") == "StatusContext":
             out.append(Context(n["context"], n.get("state") or "PENDING", bool(n.get("isRequired")),
-                               creator=(n.get("creator") or {}).get("login")))
+                               creator=(n.get("creator") or {}).get("login"),
+                               creator_is_bot=(n.get("creator") or {}).get("__typename") == "Bot"))
     return out, not (page.get("pageInfo") or {}).get("hasNextPage")
 
 

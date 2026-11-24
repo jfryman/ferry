@@ -105,10 +105,14 @@ class GitLabBackend:
     """pipeline_blocks: treat a pending or failed MR pipeline as a merge blocker (the service; see
     PIPELINE_MERGE_STATUS). The CI driver leaves it off: its own job is part of that pipeline."""
 
-    def __init__(self, client: GitLabClient, project: str | int, pipeline_blocks: bool = False):
+    def __init__(self, client: GitLabClient, project: str | int, pipeline_blocks: bool = False,
+                 own_status_prefix: str | None = None):
+        """own_status_prefix: commit statuses ferry posts itself (#29, "ferry/"). They can't succeed
+        before ferry applies, so they never make the pipeline a blocker for ferry's own apply."""
         self.client = client
         self.project = urllib.parse.quote(str(project), safe="")
         self.pipeline_blocks = pipeline_blocks
+        self.own_status_prefix = own_status_prefix
         self._bot: str | None = None
 
     @property
@@ -120,6 +124,8 @@ class GitLabBackend:
         status = mr.get("detailed_merge_status") or mr.get("merge_status") or ""
         blocking = BLOCKING_MERGE_STATUS | (PIPELINE_MERGE_STATUS if self.pipeline_blocks else set())
         blocked = sorted({status} & blocking)
+        if status in PIPELINE_MERGE_STATUS and status in blocked and self._only_own_statuses_pending(mr["sha"]):
+            blocked.remove(status)
         return ChangeRequest(
             id=mr["iid"],
             head_sha=mr["sha"],
@@ -134,6 +140,38 @@ class GitLabBackend:
             blocked_reasons=blocked,
             web_url=mr.get("web_url", ""),
         )
+
+    def _only_own_statuses_pending(self, sha: str) -> bool:
+        """Whether every commit status on sha that isn't ferry's own has passed (then a pipeline
+        blocker is only ferry's own pending or failed status). Unreadable: False (keep the blocker)."""
+        if not self.own_status_prefix:
+            return False
+        try:
+            statuses = self.client.paged(f"{self._p}/repository/commits/{sha}/statuses")
+        except GitLabError:
+            log.warning("couldn't read the commit statuses of %s; keeping the pipeline blocker", sha[:8])
+            return False
+        bot = self.bot_username()
+        # Ferry's own: its name prefix *and* posted by ferry's account (anyone with Developer can post
+        # a status named ferry/...; that one counts like any other).
+        others = [st for st in statuses
+                  if not (str(st.get("name", "")).startswith(self.own_status_prefix)
+                          and (st.get("author") or {}).get("username") == bot)]
+        return all(st.get("status") in ("success", "skipped") for st in others)
+
+    def set_status(self, sha: str, name: str, state: str, description: str, url: str | None = None) -> None:
+        """An external commit status (Developer can post). GitLab refuses a "transition" to the state a
+        status is already in (400); that is not an error here."""
+        data = {"state": {"failure": "failed", "error": "failed"}.get(state, state), "name": name,
+                "description": description[:140]}
+        if url:
+            data["target_url"] = url
+        try:
+            self.client.request("POST", f"{self._p}/statuses/{sha}", data=data)
+        except GitLabError as e:
+            if e.status == 400 and "Cannot transition" in str(e):
+                return
+            raise
 
     def merge_rule_blockers(self, cr: ChangeRequest) -> list[str]:
         return []  # GitLab's detailed_merge_status already reports its rules in blocked_reasons

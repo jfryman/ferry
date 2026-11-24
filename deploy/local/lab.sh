@@ -110,8 +110,20 @@ case "${1:-help}" in
             curl -s -X POST localhost:18999/_approve -d '{"user":"carol"}' >/dev/null
             comment james "/ferry apply" >/dev/null; wait_idle >/dev/null
             expect pusher-approval "approval from .carol. doesn't count" "$(last_comment)" ;;
+  commit-status) # #29: plan/apply statuses on the head; a ruleset requiring ferry's own
+            # `ferry/apply: lab` (pending until ferry applies) doesn't block ferry's apply
+            curl -s -X POST localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":1}},{"type":"required_status_checks","ruleset_id":2,"parameters":{"required_status_checks":[{"context":"ferry/apply: lab"}]}}]}' >/dev/null
+            "$0" push "commit status" >/dev/null
+            st() { curl -s localhost:18999/_state | python3 -c "import json,sys; s=json.load(sys.stdin)['statuses'].get(open('$LAB/pr_head').read().strip(), {}); print(s.get('$1', {}).get('state', 'none'))"; }
+            expect status-plan "^success$" "$(st 'ferry/plan: lab')"
+            expect status-apply-pending "^pending$" "$(st 'ferry/apply: lab')"
+            curl -s -X POST localhost:18999/_approve -d '{"user":"james"}' >/dev/null
+            comment james "/ferry apply" >/dev/null; wait_idle >/dev/null
+            expect status-apply-not-deadlocked "applied" "$(last_comment | head -3 | tr '\n' ' ')"
+            expect status-apply "^success$" "$(st 'ferry/apply: lab')"
+            curl -s -X POST localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":1}}]}' >/dev/null ;;
   security) # every security scenario, in an order that leaves the PR usable
-            for s in closed-plan base-branch diverged replay-comment pusher-approval; do "$0" "$s"; done ;;
+            for s in closed-plan base-branch diverged replay-comment pusher-approval commit-status; do "$0" "$s"; done ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \
               'for c in json.load(sys.stdin)["comments"]:' \
               '    print("---- comment", c["id"]); print(c["body"]); print()')" ;;

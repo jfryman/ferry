@@ -3,7 +3,8 @@
 State lives in memory; /_state shows it, /_approve adds an approval of the PR head, /_pr_state
 {"state": "closed"|"open"} closes or reopens the PR, /_pr {"base": NAME} retargets it and /_pr {"behind": N} makes it N commits behind its base. The branch has one ruleset (one approving review);
 POST /_rules {"rules": [...]} replaces its rules (GitHub's /rules/branches shape), e.g. to require
-two approvals and watch apply refuse. Run with the ferry image's Python.
+two approvals and watch apply refuse. Commit statuses ferry posts (#29) are kept per head and context
+and appear in GraphQL the way GitHub reports an App's status (creator: Bot, login = the App's slug). Run with the ferry image's Python.
 """
 import json
 import os
@@ -14,7 +15,7 @@ R = f"/repos/{REPO}"
 HEAD_FILE = os.environ.get("LAB_HEAD_FILE", "/lab/pr_head")
 WRITERS = set(os.environ.get("LAB_WRITERS", "james,pip,carol").split(","))
 # Like a fresh repo with one ruleset: one approving review on main.
-state = {"comments": [], "reviews": [], "pr_state": "open", "base": "main", "behind": 0,
+state = {"comments": [], "reviews": [], "statuses": {}, "pr_state": "open", "base": "main", "behind": 0,
          "rules": [{"type": "pull_request", "ruleset_id": 1,
                     "parameters": {"required_approving_review_count": 1}}]}
 
@@ -30,15 +31,26 @@ def approvals():
     return sum(1 for rv in latest.values() if rv["state"] == "APPROVED" and rv["commit_id"] == head())
 
 
+def required_checks():
+    return {c["context"] for r in state["rules"] if r["type"] == "required_status_checks"
+            for c in r["parameters"].get("required_status_checks", [])}
+
+
 def gql_pr():
-    """GitHub's verdict, computed from the rules like GitHub would (reviews only; no checks here)."""
+    """GitHub's verdict, computed from the rules like GitHub would (reviews and commit statuses)."""
     need = max([r["parameters"].get("required_approving_review_count", 0)
                 for r in state["rules"] if r["type"] == "pull_request"] or [0])
     decision = None if not need else ("APPROVED" if approvals() >= need else "REVIEW_REQUIRED")
+    req, sts = required_checks(), state["statuses"].get(head(), {})
+    nodes = [{"__typename": "StatusContext", "context": name, "state": st["state"].upper(),
+              "isRequired": name in req, "creator": {"__typename": "Bot", "login": "ferry-lab"}}
+             for name, st in sts.items()]
+    checks_ok = all(sts.get(name, {}).get("state") == "success" for name in req)
+    rollup = {"contexts": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}} if nodes else None
     return {"headRefOid": head(), "reviewDecision": decision,
-            "mergeStateStatus": "BLOCKED" if decision == "REVIEW_REQUIRED" else "CLEAN",
+            "mergeStateStatus": "BLOCKED" if decision == "REVIEW_REQUIRED" or not checks_ok else "CLEAN",
             "reviewRequests": {"nodes": []}, "reviewThreads": {"totalCount": 0, "nodes": []},
-            "commits": {"nodes": [{"commit": {"oid": head(), "statusCheckRollup": None}}]}}
+            "commits": {"nodes": [{"commit": {"oid": head(), "statusCheckRollup": rollup}}]}}
 
 
 def pr():
@@ -100,6 +112,11 @@ class H(BaseHTTPRequestHandler):
                  "created_at": "now"}
             state["comments"].append(c)
             return self._j(201, c)
+        if self.path.startswith(f"{R}/statuses/"):  # #29: the latest state per context wins
+            sha = self.path.rsplit("/", 1)[-1]
+            state["statuses"].setdefault(sha, {})[d["context"]] = {
+                "state": d["state"], "description": d.get("description", "")}
+            return self._j(201, {"context": d["context"], "state": d["state"]})
         if self.path == "/graphql":
             return self._j(200, {"data": {"repository": {"pullRequest": gql_pr()}}})
         if self.path == "/_rules":
