@@ -25,6 +25,25 @@ from .vcs.gitlab import GitLabClient
 # /ferry plan|apply [inventory] [--sha COMMIT]: group 1 the action, 2 the inventory, 3 the commit.
 COMMAND_RE = re.compile(r"^\s*/(?:ferry\s+)?(plan|apply)(?:\s+(?:-i\s+|--inventory[ =])?([A-Za-z0-9_.-]+))?"
                         r"(?:\s+--sha[ =]([0-9a-fA-F]{7,40}))?\s*$")
+# /ferry unlock [inventory] (#30): group 1 the inventory.
+UNLOCK_RE = re.compile(r"^\s*/ferry\s+unlock(?:\s+(?:-i\s+|--inventory[ =])?([A-Za-z0-9_.-]+))?\s*$")
+HELP_RE = re.compile(r"^\s*/ferry(?:\s+(?:help|--help|-h))\s*$")
+FERRY_PREFIX_RE = re.compile(r"^/ferry(?:\s|$)")
+
+
+def classify_command(text: str):
+    """What a comment asks ferry for, from its first line (#30): ("run", m) for plan/apply (the
+    COMMAND_RE match), ("unlock", m), ("help", None), ("bad", None) for a comment that starts with
+    `/ferry` but doesn't parse, or None for any other comment (ferry stays silent on those)."""
+    text = (text or "").strip()
+    if not FERRY_PREFIX_RE.match(text):
+        return None
+    first = text.splitlines()[0]
+    for kind, rx in (("run", COMMAND_RE), ("unlock", UNLOCK_RE), ("help", HELP_RE)):
+        m = rx.match(first)
+        if m:
+            return kind, (m if kind != "help" else None)
+    return "bad", None
 
 
 @dataclass

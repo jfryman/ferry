@@ -1334,3 +1334,92 @@ def test_an_error_mid_job_fails_the_running_status(world):
     world.deliver("pull_request", world.pr_event())
     world.drain()
     assert states(posted, "ferry/plan: homelab")[-1] == ("error", "ferry couldn't finish the plan")
+
+
+# ---- /ferry unlock, /ferry help, commands that don't parse (#30) ---------------------------------
+
+
+def test_unlock_by_a_writer_releases_the_lock_and_the_old_plan_no_longer_applies(repo, tmp_path):
+    world = World(repo, tmp_path / "world", runs=(clean_run(), clean_run(), clean_run()))
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert world.locks.get("homelab").holder == 1
+    assert world.deliver("issue_comment", world.comment_event("/ferry unlock"))[1] == "unlock queued"
+    [unlock] = world.drain()
+    assert unlock["ok"] and unlock["released"] == ["homelab"] and unlock["result"] == "ok"
+    assert world.locks.get("homelab") is None
+    assert "@james released the lock on `homelab`" in world.comments[-1]["body"]
+    assert "ferry:unlock" in world.comments[-1]["body"].splitlines()[-1]
+    # Another PR can plan the inventory now.
+    assert world.locks.try_acquire(new_lock("homelab", 2, "b" * 40, "pip")) is None
+    world.locks.release("homelab", 2)
+    # Audited in the job history: who unlocked which PR.
+    [entry] = [j for j in world.svc.state.jobs() if j["action"] == "unlock"]
+    assert (entry["pr"], entry["user"], entry["result"]) == (1, "james", "ok")
+    # The plan from before the unlock can't be applied, even approved and with the lock free.
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and refused["inventories"]["homelab"]["reasons"] == [
+        "the lock was released with `/ferry unlock` by `james` after the latest plan: re-run the plan"]
+    assert world.runner.requests[-1].check is True  # nothing was applied
+    # A new plan makes it applicable again.
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    plan, applied = world.drain()
+    assert plan["ok"] and applied["ok"], (applied.get("inventories"), applied.get("error"))
+
+
+def test_unlock_by_a_non_writer_is_refused_and_the_lock_stays(world):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert world.deliver("issue_comment", world.comment_event("/ferry unlock", user="mallory"))[1] == \
+        "unlock refused: no write access"
+    assert world.svc.jobs.empty() and world.locks.get("homelab").holder == 1
+    assert "`/ferry unlock` needs write access" in world.comments[-1]["body"]
+
+
+def test_unlock_on_a_pr_without_the_lock_changes_nothing(world):
+    world.locks.try_acquire(new_lock("homelab", 7, "c" * 40, "pip"))  # another PR holds it
+    n = len(world.comments)
+    world.deliver("issue_comment", world.comment_event("/ferry unlock homelab"))
+    [unlock] = world.drain()
+    assert not unlock["ok"] and unlock["result"] == "refused"
+    assert world.locks.get("homelab").holder == 7
+    assert len(world.comments) == n + 1 and "doesn't hold the lock on `homelab`" in world.comments[-1]["body"]
+
+
+def test_unlock_names_one_inventory(world):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.locks.try_acquire(new_lock("lab", 1, world.sha, "pip"))
+    world.deliver("issue_comment", world.comment_event("/ferry unlock lab"))
+    [unlock] = world.drain()
+    assert unlock["released"] == ["lab"] and world.locks.get("homelab").holder == 1
+
+
+def test_help_and_bad_commands_get_one_rate_limited_reply(world):
+    n = len(world.comments)
+    assert world.deliver("issue_comment", world.comment_event("/ferry help"))[1] == "help posted"
+    assert "`/ferry unlock [inventory]`" in world.comments[-1]["body"]
+    later = "2027-01-15T08:10:01Z"  # NOW + 601 s: the next 10-minute window
+    world.svc.clock = lambda: NOW + 601
+    assert world.deliver("issue_comment", world.comment_event("/ferry aply", at=later))[1] == \
+        "not understood: help posted"
+    assert "didn't understand that command: /ferry aply" in world.comments[-1]["body"]
+    # A second bad command within the limit gets no reply.
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan prod extra", at=later))[1] == \
+        "help already posted recently"
+    assert len(world.comments) == n + 2 and world.svc.jobs.empty()
+
+
+def test_only_comments_starting_with_ferry_get_a_reply(world):
+    for body in ("lgtm", "please /ferry apply this", "/ferryman", "/plan", "> /ferry aply"):
+        assert world.deliver("issue_comment", world.comment_event(body))[1] == "not a ferry command", body
+    assert world.comments == [] and world.svc.jobs.empty()
+
+
+def test_a_bad_command_reply_escapes_the_comment(world):
+    world.deliver("issue_comment", world.comment_event("/ferry <img src=x> @everyone `x`"))
+    body = world.comments[-1]["body"]
+    assert "<img" not in body and "@everyone" not in body

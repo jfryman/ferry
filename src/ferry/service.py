@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import config as config_mod
+from . import render
 from .credentials import OpenBao, job_credentials
 from .engine import Engine
 from .locks import LockStore
@@ -62,7 +63,7 @@ from . import __version__
 from .metrics import Metrics, reject_reason
 from .state import MemoryState
 from .vcs.github import GitHubBackend
-from .webhook import COMMAND_RE
+from .webhook import classify_command
 from .galaxy import collections_path as galaxy_path
 from .workspace import CheckoutError, Workspace
 
@@ -438,17 +439,46 @@ class Service:
         user = p["comment"]["user"]["login"]
         if user == self.vcs.bot_username():
             return 202, "own comment"
-        m = COMMAND_RE.match(p["comment"].get("body", "").strip().splitlines()[0] if p["comment"].get("body") else "")
-        if not m or not p["comment"]["body"].lstrip().startswith("/ferry"):
+        body = p["comment"].get("body") or ""
+        parsed = classify_command(body)
+        if parsed is None:  # only comments starting with /ferry are ferry's business
             return 202, "not a ferry command"
+        kind, m = parsed
         stale = self._stale(p["comment"].get("created_at"), p["comment"].get("updated_at"))
         if stale:
             return 202, stale
         cid = p["comment"].get("id")
         if not _valid_id(cid):
             return 400, "comment id missing or malformed"
-        return self._once(self._comment_key("comment", self.settings.repo.lower(), cid),
-                          lambda: self._on_command(p, m, delivery))
+        if kind == "run":
+            dispatch = lambda: self._on_command(p, m, delivery)  # noqa: E731
+        else:
+            dispatch = lambda: self._on_other_command(  # noqa: E731
+                p["issue"]["number"], user, kind, m, body.strip().splitlines()[0], delivery)
+        return self._once(self._comment_key("comment", self.settings.repo.lower(), cid), dispatch)
+
+    # ---- /ferry unlock, /ferry help, and commands that don't parse (#30) -------------------------
+
+    HELP_INTERVAL = 600  # at most one help reply per PR per 10 minutes: it can't make ferry spam
+
+    def _on_other_command(self, number: int, user: str, kind: str, m, first_line: str,
+                          delivery: str) -> tuple[int, str]:
+        if kind in ("help", "bad"):
+            now = self.clock()
+            key = f"help:{self.settings.repo.lower()}:{number}:{int(now // self.HELP_INTERVAL)}"
+            if not self.state.first_sight([key], now):
+                return 202, "help already posted recently"
+            self.vcs.post_note(number, render.help_comment(first_line if kind == "bad" else None))
+            return 202, "help posted" if kind == "help" else "not understood: help posted"
+        # unlock: frees a lock other changes wait on, so it needs write access like plan and apply.
+        if not self.vcs.can_apply(user):
+            self.vcs.post_note(number, f"`/ferry unlock` needs {self.access}; @{user} doesn't have it.")
+            return 202, f"unlock refused: no {self.access}"
+        cr = self.vcs.get_change_request(number)
+        if not self._open_or_say(cr, "unlock"):
+            return 202, f"unlock refused: {self.noun} is {cr.state}"
+        # Through the queue: never while a plan or apply of this ferry runs, and in the job history.
+        return self._enqueue(Job("unlock", number, cr.head_sha, user, m.group(1), delivery, pinned=True))
 
     def _on_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
         action, inventory, named = m.group(1), m.group(2), m.group(3)
@@ -557,7 +587,7 @@ class Service:
                 if job.pr:
                     self._report_not_run(job, f"{off}. Nothing ran against the hosts.")
             elif job.action == "unlock":
-                result.update(self._unlock(job))
+                result.update(self._unlock_command(job) if job.pinned else self._unlock(job))
             elif job.action == "drift":
                 result.update(self._drift())
             else:
@@ -610,6 +640,22 @@ class Service:
         except Exception as e:
             log.warning("#%s: couldn't read its state (%s); releasing its locks anyway", job.pr, e)
         return {"ok": True, "released": self.locks.release_all(job.pr)}
+
+    def _unlock_command(self, job: Job) -> dict:
+        """`/ferry unlock [inventory]` (#30): release the locks this PR holds and say so with a signed
+        marker, after which its plan no longer applies (apply re-takes the lock, so it must re-plan)."""
+        if job.inventory:
+            released = [job.inventory] if self.locks.release(job.inventory, job.pr) else []
+        else:
+            released = sorted(self.locks.release_all(job.pr))
+        if not released:
+            what = f"the lock on `{job.inventory}`" if job.inventory else "any inventory lock"
+            self.vcs.post_note(job.pr, f"`/ferry unlock`: this {self.noun} doesn't hold {what}. Nothing changed.")
+            return {"ok": False, "inventories": {job.inventory or "*": {"ok": False, "reasons": ["no lock held"]}}}
+        for inv in released:
+            self.vcs.post_note(job.pr, render.unlock_comment(inv, job.user, self.clock(), self.marker_key()))
+        log.info("#%s: %s released %s with /ferry unlock", job.pr, job.user, ", ".join(released))
+        return {"ok": True, "released": released}
 
     def _redactor(self, cfg, env: dict) -> Redactor:
         # The job's own credentials (OpenBao token, ...) live only in the per-job env, not os.environ:

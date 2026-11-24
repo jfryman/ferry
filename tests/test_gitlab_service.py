@@ -825,3 +825,51 @@ def test_gitlab_statuses_and_no_self_deadlock(world):
     result, reasons = apply_reasons(world, "st-1")
     assert result["ok"], reasons
     assert [p["state"] for p in posted if p["name"] == "ferry/apply: homelab"][-1] == "success"
+
+
+# ---- /ferry unlock, /ferry help, notes that don't parse (#30) ------------------------------------
+
+
+def test_unlock_by_a_developer_releases_the_lock_and_the_old_plan_no_longer_applies(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    [plan] = world.drain()
+    assert plan["ok"] and world.locks.get("homelab").holder == 1
+    assert world.deliver("Note Hook", world.note_event("/ferry unlock"))[1] == "unlock queued"
+    [unlock] = world.drain()
+    assert unlock["ok"] and unlock["released"] == ["homelab"] and world.locks.get("homelab") is None
+    assert "@alice released the lock on `homelab`" in world.notes[-1]["body"]
+    assert world.locks.try_acquire(new_lock("homelab", 2, "b" * 40, "bob")) is None  # another MR can plan
+    world.locks.release("homelab", 2)
+    [entry] = [j for j in world.svc.state.jobs() if j["action"] == "unlock"]
+    assert (entry["pr"], entry["user"], entry["result"]) == (1, "alice", "ok")
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    result, reasons = apply_reasons(world, "after-unlock")
+    assert not result["ok"] and reasons == [
+        "the lock was released with `/ferry unlock` by `alice` after the latest plan: re-run the plan"]
+
+
+def test_unlock_by_a_non_developer_is_refused_and_the_lock_stays(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert world.deliver("Note Hook", world.note_event("/ferry unlock", user="eve"))[1] == \
+        "unlock refused: no Developer access"
+    assert world.svc.jobs.empty() and world.locks.get("homelab").holder == 1
+    assert "`/ferry unlock` needs Developer access" in world.notes[-1]["body"]
+
+
+def test_unlock_on_an_mr_without_the_lock_changes_nothing(world):
+    world.locks.try_acquire(new_lock("homelab", 7, "c" * 40, "bob"))
+    world.deliver("Note Hook", world.note_event("/ferry unlock"))
+    [unlock] = world.drain()
+    assert unlock["result"] == "refused" and world.locks.get("homelab").holder == 7
+    assert "doesn't hold any inventory lock" in world.notes[-1]["body"]
+
+
+def test_help_and_bad_notes_get_one_rate_limited_reply(world):
+    assert world.deliver("Note Hook", world.note_event("/ferry aply"))[1] == "not understood: help posted"
+    assert "`/ferry help`" in world.notes[-1]["body"]
+    n = len(world.notes)
+    assert world.deliver("Note Hook", world.note_event("/ferry help"))[1] == "help already posted recently"
+    for body in ("lgtm", "try /ferry aply", "/ferryboat"):
+        assert world.deliver("Note Hook", world.note_event(body))[1] == "not a ferry command"
+    assert len(world.notes) == n and world.svc.jobs.empty()

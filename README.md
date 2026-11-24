@@ -94,6 +94,20 @@ keeps the lock: it fails closed. Closed and merged MRs are never planned. Exclud
 `ferry-lock-*` tags from pipelines in the consumer's `workflow:rules`. Use a CI `resource_group`
 on apply jobs as a second guard.
 
+`ferry serve` also takes `/ferry unlock [inventory]` on the MR/PR that holds a lock (write access;
+Developer+ on GitLab): it releases the lock (all of this change's locks without an inventory), says
+who did it, and is recorded in the job history (`GET /jobs`, action `unlock`). The change's plan
+stops counting: apply refuses until it is planned again, so an unlocked plan can't be applied over
+whatever planned in between. On a change that doesn't hold the lock, unlock says so and changes
+nothing.
+
+## Help and mistyped commands (`ferry serve`)
+
+`/ferry help` lists the commands. A comment that starts with `/ferry` but doesn't parse
+(`/ferry aply`, `/ferry plan prod extra`) gets the same list with what ferry didn't understand.
+These replies are limited to one per change per 10 minutes, so nobody can make ferry spam a thread.
+Comments that don't start with `/ferry` are never answered.
+
 ## Busy hosts
 
 A failed task whose message starts with `guard.busy_marker` (`FERRY_HOST_BUSY` by default) means

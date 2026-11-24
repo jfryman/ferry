@@ -11,9 +11,9 @@ from .results import RunResult, diff_paths, render_diff
 from .sanitize import MASK, Redactor
 from .scope import Scope
 
-MARKER_RE = re.compile(r"<!-- ferry:(plan|apply|lock) (\{.*?\}) -->", re.DOTALL)
+MARKER_RE = re.compile(r"<!-- ferry:(plan|apply|lock|unlock) (\{.*?\}) -->", re.DOTALL)
 # The one marker ferry trusts: the whole last line of a comment (#24).
-LAST_LINE_MARKER_RE = re.compile(r"\A<!-- ferry:(plan|apply|lock) (\{[^\n]*\}) -->\Z")
+LAST_LINE_MARKER_RE = re.compile(r"\A<!-- ferry:(plan|apply|lock|unlock) (\{[^\n]*\}) -->\Z")
 ICON = {"ok": "✅", "changed": "🟡", "failed": "❌", "unreachable": "📵", "blocked": "⏸️"}
 
 # Characters that are markup in GitHub/GitLab markdown or HTML, as numeric entities. Applied to
@@ -231,3 +231,28 @@ def apply_comment(inventory: str, sha: str, run: RunResult, meta: dict, red: Red
 def refusal_comment(action: str, inventory: str, sha: str, reasons: list[str], red: Redactor) -> str:
     items = "\n".join(f"- {neutralize(red.text(r))}" for r in reasons)
     return f"### ferry {action}: `{inventory}` @ `{sha[:8]}` refused\n\n{items}"
+
+
+HELP = """### ferry commands
+
+- `/ferry plan [inventory] [--sha COMMIT]`: check-mode run of this change (needs write access).
+- `/ferry apply [inventory] [--sha COMMIT]`: apply the latest clean plan, once it's approved.
+- `/ferry unlock [inventory]`: release the inventory lock this change holds, so another change can
+  plan. The plan on this change can't be applied after that: plan it again first.
+- `/ferry help`: this list.
+
+Only comments that start with `/ferry` are read; the command is the first line."""
+
+
+def help_comment(bad: str | None = None) -> str:
+    if bad is None:
+        return HELP
+    return f"ferry didn't understand that command: {inline(bad[:80])}\n\n{HELP}"
+
+
+def unlock_comment(inventory: str, user: str, at: float, key: bytes | None = None) -> str:
+    # inventory and user are command-parsed names ([A-Za-z0-9_.-]) and a code-host login.
+    body = (f"### ferry unlock: `{inventory}`\n\n@{inline(user)} released the lock on "
+            f"`{inventory}`; another change can plan it now. The plan on this change no "
+            f"longer applies: run `/ferry plan` again before `/ferry apply`.")
+    return body + "\n\n" + marker("unlock", {"v": 1, "inventory": inventory, "user": user, "at": at}, key)

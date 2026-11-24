@@ -143,16 +143,21 @@ class Engine:
         return f"inventory `{inventory}` is locked by !{held.holder} (since {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(held.since))}); merge or close it first"
 
     def latest_plan(self, cr_id: int, inventory: str) -> dict | None:
-        """Newest plan marker posted by ferry's own account (markers from anyone else are ignored)."""
+        """Newest plan marker posted by ferry's own account (markers from anyone else are ignored),
+        or None if there is none, or a `/ferry unlock` came after it (#30)."""
+        kind, data = self._latest_plan_or_unlock(cr_id, inventory)
+        return data if kind == "plan" else None
+
+    def _latest_plan_or_unlock(self, cr_id: int, inventory: str) -> tuple[str | None, dict | None]:
         assert self.vcs is not None
         bot = self.vcs.bot_username()
-        latest = None
+        latest: tuple[str | None, dict | None] = (None, None)
         for note in self.vcs.list_notes(cr_id):
             if note.author != bot:
                 continue
             found = render.trusted_marker(note.body, self.marker_key)
-            if found and found[0] == "plan" and found[1].get("inventory") == inventory:
-                latest = found[1]
+            if found and found[0] in ("plan", "unlock") and found[1].get("inventory") == inventory:
+                latest = found
         return latest
 
     # ---- commands ------------------------------------------------------------------------------
@@ -275,8 +280,13 @@ class Engine:
         if not self.vcs.can_apply(user):
             reasons.append(f"`{user}` may not apply here (needs Developer+ on GitLab, write on GitHub)")
 
-        plan = self.latest_plan(cr_id, inventory)
-        if plan is None:
+        kind, plan = self._latest_plan_or_unlock(cr_id, inventory)
+        if kind == "unlock":
+            who = (plan or {}).get("user")
+            reasons.append(f"the lock was released with `/ferry unlock`{f' by `{who}`' if who else ''} after the "
+                           "latest plan: re-run the plan")
+            plan = None
+        elif plan is None:
             reasons.append("no ferry plan on this MR yet")
         else:
             if plan.get("sha") != cr.head_sha:
