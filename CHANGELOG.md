@@ -1,11 +1,12 @@
 # Changelog
 
-- Operator hardening: apply disable gates both client-chosen modes; safe configurable display
-  identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
-
 All notable changes to ferry. Versions follow [semver](https://semver.org); tags are `vX.Y.Z`.
 
 ## Unreleased
+
+### Security
+- Operator hardening: apply disable gates both client-chosen modes; safe configurable display
+  identity alongside stable subjects; 30-second iat/nbf-only skew; private audit/metrics routing.
 
 ### Added
 - `ferry run`: local check/diff (explicit `--apply`) through service-owned SQLite locks,
