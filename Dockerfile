@@ -2,6 +2,9 @@
 # requirements.yml into the work dir at run time (cached by hash), so the image stays generic.
 FROM python:3.13-slim
 
+LABEL org.opencontainers.image.source="https://github.com/jfryman/ferry" \
+      org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
  && rm -rf /var/lib/apt/lists/*
