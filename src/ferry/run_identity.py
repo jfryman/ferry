@@ -6,6 +6,10 @@ import time
 import urllib.request
 
 
+def reject_constant(value):
+    raise ValueError('non-standard JSON constant')
+
+
 def unb64(value):
     return base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
 
@@ -29,7 +33,7 @@ class IdentityVerifier:
             from cryptography.hazmat.primitives import hashes
             from cryptography.exceptions import InvalidSignature
             a, b, c = token.split('.')
-            header, claims = json.loads(unb64(a)), json.loads(unb64(b))
+            header, claims = json.loads(unb64(a), parse_constant=reject_constant), json.loads(unb64(b), parse_constant=reject_constant)
             # No algorithm negotiation, symmetric keys, remote jku/x5u, or unsigned JWTs.
             if header.get('alg') != 'RS256' or not isinstance(header.get('kid'), str):
                 raise ValueError()

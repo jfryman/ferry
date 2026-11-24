@@ -38,3 +38,13 @@
 - `iat`/`nbf` permit 30 seconds skew; `exp` remains strict.
 - One backend listener: ingress must expose only authenticated POST operator API routes,
   plus explicitly enabled code-host webhook routes. `/jobs` and `/metrics` stay private.
+
+## Pending start and audit contract
+- Starts persist `pending`; lease/finish refuse pending runs (409). After signing, the service
+  verifies pending state and matching lock under the mutex before activation/credential return.
+- Issuance appends an `issued` audit row before returning credentials; finish/expiry appends
+  its own row. Metrics count completion only. Playbook is bounded repo-relative, client asserted.
+- Scheduled drift acquires each inventory lock before credentials, records/skips held inventories,
+  and releases its `drift` holder in finally. PR/operator paths refuse that string holder.
+- CLI terminal streams are privately buffered then redacted (vault password/cert/private key,
+  config patterns and built-ins). Use no_log/diff:false for sensitive tasks regardless.

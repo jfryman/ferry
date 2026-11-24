@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,6 +15,8 @@ import urllib.request
 
 from .runner import ferry_ansible_env
 from .results import parse_file
+from .sanitize import Redactor
+from . import config
 
 
 class OperatorError(RuntimeError):
@@ -87,6 +90,7 @@ def run(args):
     ok = False
     counts, changed = {}, []
     old_handlers = {}
+    stdout = stderr = None
 
     def interrupted(signum, frame):
         raise KeyboardInterrupt()
@@ -113,7 +117,7 @@ def run(args):
                            check=True, capture_output=True)
             try:
                 result = request('/api/runs', dict(inventory=args.inventory, limit=args.limit,
-                    mode='apply' if args.apply else 'check', sha=sha, public_key=key.with_suffix('.pub').read_text()))
+                    mode='apply' if args.apply else 'check', sha=sha, playbook=playbook.relative_to(repo).as_posix(), public_key=key.with_suffix('.pub').read_text()))
                 run_id = result['run_id']
                 print(f'ferry run: {run_id} ({"apply" if args.apply else "check"})', flush=True)
                 (tmp / 'id_ed25519-cert.pub').write_text(result['certificate'])
@@ -158,7 +162,15 @@ def run(args):
                     cmd += ['--check', '--diff']
                 if args.limit:
                     cmd += ['--limit', args.limit]
-                proc = subprocess.Popen(cmd, cwd=repo, env=env, start_new_session=True)
+                cfg = config.load(repo / 'ferry.yaml')
+                red = Redactor(cfg.redact.patterns, cfg.redact.env_vars, cfg.redact.sensitive_paths,
+                               environ=env, values=[result['vault_password'], result['certificate'], key.read_text()])
+                # Buffer in private temporary files, then redact the complete streams (including
+                # multiline values) before terminal delivery. No pipe backpressure or split-secret leak.
+                stdout = tempfile.TemporaryFile(mode='w+b')
+                stderr = tempfile.TemporaryFile(mode='w+b')
+                proc = subprocess.Popen(cmd, cwd=repo, env=env, start_new_session=True,
+                                        stdout=stdout, stderr=stderr)
                 # Lease failure before launch must not leave a live playbook.
                 if lease_failed.is_set():
                     terminate()
@@ -174,14 +186,22 @@ def run(args):
                     except subprocess.TimeoutExpired:
                         pass
                 rc = proc.wait()
+                for captured, destination in ((stdout, sys.stdout), (stderr, sys.stderr)):
+                    captured.seek(0)
+                    destination.write(red.text(captured.read().decode('utf-8', errors='replace')))
+                    destination.flush()
+                    captured.close()
                 ok = rc == 0 and not lease_failed.is_set()
                 if events.exists():
                     summary = parse_file(events, 'FERRY_HOST_BUSY', rc)
                     counts = summary.counts()
                     changed = [name for name, h in summary.hosts.items() if h.state == 'changed']
-                return 0 if ok else 1
+                return rc if rc > 0 else (0 if ok else 1)
             finally:
                 terminate()
+                for captured in (stdout, stderr):
+                    if captured is not None and not captured.closed:
+                        captured.close()
                 stop.set()
                 if renewer:
                     renewer.join(timeout=25)

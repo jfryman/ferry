@@ -591,7 +591,7 @@ def test_metrics_and_job_history(world, http):
     assert jobs[0] == {"id": 2, "action": "apply", "pr": 1, "sha": world.sha[:12], "user": "james",
                        "inventory": None, "result": "refused", "started": NOW, "seconds": 0.0,
                        "trigger": "webhook", "run_id": None, "subject": None, "limit": None,
-                       "mode": None, "certificate_serial": None, "counts": None, "display_name": None}
+                       "mode": None, "certificate_serial": None, "counts": None, "display_name": None, "playbook": None}
     world.svc.jobs.put(Job("unlock", 1, world.sha, "pip"))
     world.closed = True
     world.drain()
@@ -1427,3 +1427,37 @@ def test_a_bad_command_reply_escapes_the_comment(world):
     world.deliver("issue_comment", world.comment_event("/ferry <img src=x> @everyone `x`"))
     body = world.comments[-1]["body"]
     assert "<img" not in body and "@everyone" not in body
+
+
+@pytest.mark.parametrize('holder', [1, 'run:pending (operator)'])
+def test_drift_skips_held_inventory_before_credentials(world, monkeypatch, holder):
+    from ferry.locks import Lock
+    from unittest.mock import Mock
+    world.locks.try_acquire(Lock('homelab', holder, world.sha, 'operator', NOW))
+    credentials = Mock(side_effect=AssertionError('must not mint'))
+    monkeypatch.setattr('ferry.service.job_credentials', credentials)
+    result = world.svc._drift()
+    assert result['drift']['homelab'] == {'skipped': 'inventory locked'}
+    credentials.assert_not_called()
+    assert world.svc.state.jobs()[0]['result'] == 'skipped'
+    assert world.locks.get('homelab').holder == holder
+
+
+def test_drift_holds_lock_before_credentials_and_releases_on_error(world, monkeypatch):
+    from contextlib import contextmanager
+    @contextmanager
+    def credentials(*args):
+        assert world.locks.get('homelab').holder == 'drift'
+        # A PR cannot reclaim a string holder as if it were a closed change request.
+        from ferry.engine import Engine
+        from ferry import config
+        main, _ = world.svc.workspace.main('main')
+        cfg = config.load(main/'ferry.yaml')
+        eng = world.svc._engine(cfg, main, {})
+        assert 'drift' in eng._lock_conflict('homelab', 1, world.sha, 'operator')
+        raise RuntimeError('upstream unavailable')
+        yield {}
+    monkeypatch.setattr('ferry.service.job_credentials', credentials)
+    with pytest.raises(RuntimeError, match='upstream unavailable'):
+        world.svc._drift()
+    assert world.locks.get('homelab') is None

@@ -533,10 +533,11 @@ apply:
 
 `POST /api/runs` accepts `{inventory, limit, mode: check|apply, sha, public_key}` and returns only
 that run's ID, certificate, vault password, inventory path and lease expiry. Lease and finish are
-`POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Finish accepts
-`{ok, counts, changed_hosts}`; results are operator-reported, not independent execution attestation.
+`POST /api/runs/{id}/lease` and `/finish`; only the starting subject may use them. Start also requires a bounded repo-relative `playbook` path (client-asserted, not attested). Finish accepts
+`{ok, counts}`; results are operator-reported, not independent execution attestation.
 CLI check versus apply is **client-chosen**, not enforced by the certificate: both receive the
-same inventory credential. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
+same inventory credential. Scheduled drift now takes the same inventory lock before minting
+credentials and records/skips held inventories. Therefore `ferry switch apply off` or `FERRY_ALLOW_COMMANDS=plan`
 refuses **all new CLI runs, including check**. It does not revoke already-issued credentials. A PR lock refuses a run; a run lock refuses a PR.
 `FERRY_RUN_LEASE_SECONDS` defaults to 300; renewal never extends past the signed certificate's
 actual expiry. SQLite persists leases across restarts. There are no tokens or passwords in state.
@@ -544,7 +545,9 @@ actual expiry. SQLite persists leases across restarts. There are no tokens or pa
 Unicode control/format characters, collapses whitespace and bounds it to 128 characters; missing,
 non-string or empty names fall back to `sub`. Authorization and run ownership always use stable
 `sub`, never the display name. Lock holders show both; names are not metric labels.
-`/jobs` records `trigger: cli`, subject, `display_name`, run ID, inventory, limit, mode, full SHA, result and the
+`/jobs` records an `issued` event when credentials are returned, then a completion/expiry event.
+Issuance is audit only, not an extra finish metric. It records `trigger: cli`, subject, `display_name`,
+client-asserted `playbook`, run ID, inventory, limit, mode, full SHA, result and the
 certificate **serial**. The role still owns `key_id_format`: match sshd's serial to the audit.
 `ferry_jobs_by_trigger_total{trigger="cli",action="plan|apply",result="..."}` counts finishes.
 Keep `/jobs` and `/metrics` private and off public routes (see deployment guidance above).
@@ -577,6 +580,10 @@ certificate expires, and existing SSH sessions may survive it. Lease expiry free
 not host access. Keep certificate TTLs short, restrict principals and monitor sshd serials.
 The playbook runs as your local user: it can read its own key/password **and any files accessible
 to your user**, including login-token files. A minimal child environment and temporary HOME are
-hygiene, not a sandbox. Use a dedicated operator account/container for untrusted code; the lab does.
+hygiene, not a sandbox. CLI stdout/stderr are buffered in private temporary files and passed through
+the existing redactor (including fetched vault password, certificate and private key) before terminal
+delivery. Output appears after Ansible exits. Redaction is a safety net: use `no_log: true` and
+`diff: false` on secret-bearing tasks; arbitrary transformed values and sensitive diffs cannot be
+reliably inferred by text filtering. Use a dedicated operator account/container for untrusted code; the lab does.
 The client SHA/limit/mode and result are audit assertions by an authorized operator, not proof that
 an arbitrary client ran those exact bytes. Protect operator identities as privileged credentials.

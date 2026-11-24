@@ -119,6 +119,8 @@ class Runs:
                 run = json.loads(row[0])
                 if run['subject'] != claims['sub']:
                     raise RunError(403, 'different subject')
+                if run.get('state', 'active') != 'active':
+                    raise RunError(409, 'run pending')
                 if m[2] == 'lease':
                     run['lease_expires_at'] = min(self.svc.clock() + self.svc.settings.run_lease_seconds,
                                                   run['certificate_expires_at'])
@@ -149,6 +151,9 @@ class Runs:
         svc, now = self.svc, self.svc.clock()
         if data.get('mode') not in ('check', 'apply') or not re.fullmatch('[a-f0-9]{40}', str(data.get('sha', ''))):
             raise RunError(400, 'invalid mode or sha')
+        playbook = data.get('playbook')
+        if not isinstance(playbook, str) or not 0 < len(playbook) <= 512 or playbook.startswith('/') or '\\' in playbook or any(p in ('', '.', '..') for p in playbook.split('/')) or any(ord(c) < 32 or ord(c) == 127 for c in playbook):
+            raise RunError(400, 'invalid repo-relative playbook')
         limit = data.get('limit')
         if limit is not None and (not isinstance(limit, str) or len(limit) > 1024 or any(ord(c)<32 for c in limit)):
             raise RunError(400, 'invalid limit')
@@ -193,7 +198,7 @@ class Runs:
         name = ' '.join(name.split())[:128] or claims['sub']
         holder = f"run:{rid} ({name}; sub={claims['sub']})"
         run = dict(run_id=rid, holder=holder, subject=claims['sub'], display_name=name, inventory=inv.name,
-                   limit=limit, mode=data['mode'], sha=data['sha'], started=now,
+                   limit=limit, mode=data['mode'], sha=data['sha'], playbook=playbook, state='pending', started=now,
                    certificate_serial=None, certificate_expires_at=now + svc.settings.run_lease_seconds,
                    lease_expires_at=now + svc.settings.run_lease_seconds)
         # Same table/transaction as PR locks. Persist the initial lease atomically with acquire:
@@ -203,7 +208,7 @@ class Runs:
             try:
                 held = db.execute('SELECT holder FROM locks WHERE key = ?', (inv.name,)).fetchone()
                 if held:
-                    raise RunError(409, f'locked by {held[0]}')
+                    raise RunError(409, 'inventory locked')
                 db.execute('INSERT INTO locks (key, holder, sha, user, since) VALUES (?, ?, ?, ?, ?)',
                            (inv.name, holder, data['sha'], claims['sub'], now))
                 db.execute('INSERT INTO runs VALUES (?, ?)', (rid, json.dumps(run)))
@@ -228,9 +233,17 @@ class Runs:
                 # lock. A slow start still fails, rather than resurrecting an elapsed initial lease.
                 if svc.clock() >= run['lease_expires_at'] or svc.clock() >= expires:
                     raise RunError(503, 'initial lease expired')
-                run.update(certificate_serial=serial, certificate_expires_at=expires,
+                with closing(self.db()) as db:
+                    persisted = db.execute('SELECT data FROM runs WHERE id = ?', (rid,)).fetchone()
+                    held = db.execute('SELECT holder FROM locks WHERE key = ?', (inv.name,)).fetchone()
+                if not persisted or json.loads(persisted[0]).get('state') != 'pending' or not held or held[0] != holder:
+                    raise RunError(409, 'run or lock lost during start')
+                run.update(state='active', certificate_serial=serial, certificate_expires_at=expires,
                            lease_expires_at=min(svc.clock() + svc.settings.run_lease_seconds, expires))
                 self.save(run)
+                # Fail closed if the issuance audit cannot be persisted. No credentials in this row.
+                svc.state.record_job({**run, 'action': 'apply' if run['mode'] == 'apply' else 'plan',
+                    'trigger': 'cli', 'user': run['subject'], 'result': 'issued', 'seconds': 0})
                 self.inflight.discard(rid)
             return dict(run_id=rid, certificate=cert, vault_password=password,
                         lease_expires_at=run['lease_expires_at'], inventory_path=inv.path,

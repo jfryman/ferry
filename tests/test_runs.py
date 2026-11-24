@@ -111,7 +111,7 @@ def api(repo, tmp_path, monkeypatch, signer):
     world.svc.bao = world.bao
     pub = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes(
         serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
-    world.payload = dict(mode='apply', inventory='homelab', sha=world.sha, public_key=pub, limit='example-host')
+    world.payload = dict(playbook='site.yml', mode='apply', inventory='homelab', sha=world.sha, public_key=pub, limit='example-host')
     world.token = signer.token
 
     def request(path='/api/runs', data=None, token=None, body=None):
@@ -241,7 +241,7 @@ def test_other_subject_cannot_touch_run(api, action):
         assert db.execute('SELECT data FROM runs').fetchone()[0] == before
     assert api.locks.count() == 1
     assert api.bao.mock_calls == []
-    assert api.svc.state.jobs() == []
+    assert api.svc.state.jobs()[0]['result'] == 'issued'
 
 
 @pytest.mark.parametrize('action', ['lease', 'finish'])
@@ -258,7 +258,8 @@ def test_lease_expiry_releases_lock_and_audits(api):
     api.svc.runs.expire()
     assert api.locks.get('homelab') is None
     assert api.request(f"/api/runs/{run['run_id']}/lease", data={})[0] == 404
-    [job] = SQLiteState(api.locks.path).jobs()
+    job, issued = SQLiteState(api.locks.path).jobs()
+    assert issued['result'] == 'issued'
     assert job['run_id'] == run['run_id']
     assert job['subject'] == SUBJECT and job['user'] == SUBJECT
     assert job['result'] == 'error' and job['trigger'] == 'cli'
@@ -289,7 +290,8 @@ def test_finish_audits_metadata_not_credentials(api, ok, result):
     assert api.request(f"/api/runs/{run['run_id']}/finish", data={'ok': ok, 'output': 'private-output'}) == (
         200, {'ok': True})
     assert api.locks.count() == 0
-    [job] = SQLiteState(api.locks.path).jobs()
+    job, issued = SQLiteState(api.locks.path).jobs()
+    assert issued['result'] == 'issued'
     assert job['result'] == result and job['sha'] == api.sha
     assert job['limit'] == 'example-host' and job['trigger'] == 'cli'
     with closing(sqlite3.connect(api.locks.path)) as db:
@@ -427,3 +429,62 @@ def test_identity_fixed_activation_leeway(api, field, offset, accepted):
 def test_identity_expiration_has_no_leeway(api):
     assert api.request(token=api.token({'exp': NOW-1, 'iat': NOW+30}))[0] == 401
     assert_not_minted(api)
+
+
+@pytest.mark.parametrize('action', ['finish', 'lease'])
+def test_pending_run_cannot_be_finished_or_renewed(api, action):
+    entered, release = threading.Event(), threading.Event()
+    def sign(*args):
+        entered.set()
+        assert release.wait(5)
+        return certificate(NOW+180)
+    api.bao.sign_ssh_key.side_effect = sign
+    results = []
+    thread = threading.Thread(target=lambda: results.append(api.request()))
+    thread.start()
+    assert entered.wait(3)
+    try:
+        with sqlite3.connect(api.locks.path) as db:
+            run = json.loads(db.execute('SELECT data FROM runs').fetchone()[0])
+        assert run['state'] == 'pending'
+        assert api.request()[0] == 409
+        assert api.request(f"/api/runs/{run['run_id']}/{action}", data={'ok': True}) == (409, {'error': 'run pending'})
+        assert api.locks.get('homelab').holder == run['holder']
+    finally:
+        release.set()
+        thread.join(5)
+    assert results[0][0] == 201
+    assert api.locks.get('homelab').holder == run['holder']
+    assert api.svc.state.jobs()[0]['result'] == 'issued'
+
+
+@pytest.mark.parametrize('lost', ['run', 'lock'])
+def test_lost_pending_state_fails_closed(api, lost):
+    def sign(*args):
+        with sqlite3.connect(api.locks.path) as db:
+            db.execute('DELETE FROM '+('runs' if lost == 'run' else 'locks'))
+        return certificate(NOW+180)
+    api.bao.sign_ssh_key.side_effect = sign
+    assert api.request() == (409, {'error': 'run or lock lost during start'})
+    assert api.locks.count() == 0
+    assert api.svc.state.jobs() == []
+
+
+@pytest.mark.parametrize('playbook', ['/etc/passwd', '../site.yml', 'a/../site.yml', 'a\\site.yml', '', 'x'*513, 'site\n.yml'])
+def test_invalid_playbook_never_mints(api, playbook):
+    assert api.request(data={**api.payload, 'playbook': playbook})[0] == 400
+    assert_not_minted(api)
+
+
+@pytest.mark.parametrize('field', ['iat', 'nbf', 'exp'])
+@pytest.mark.parametrize('value', [True, False, float('nan'), float('inf'), -float('inf'), '123'])
+def test_numeric_dates_are_strict(api, field, value):
+    assert api.request(token=api.token({field: value}))[0] == 401
+    assert_not_minted(api)
+
+
+def test_drift_holder_refuses_operator(api):
+    from ferry.locks import Lock
+    api.locks.try_acquire(Lock('homelab', 'drift', api.sha, 'schedule', NOW))
+    assert api.request()[0] == 409
+    assert api.bao.mock_calls == []

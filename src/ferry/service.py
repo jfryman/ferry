@@ -56,7 +56,7 @@ from . import config as config_mod
 from . import render
 from .credentials import OpenBao, job_credentials
 from .engine import Engine
-from .locks import LockStore
+from .locks import LockStore, Lock
 from .runner import AnsibleRunner
 from .sanitize import Redactor
 from . import __version__
@@ -813,14 +813,24 @@ class Service:
         cfg = config_mod.load(main_dir / "ferry.yaml")
         env = self._collections(main_dir)
         results = {}
-        with job_credentials(self.bao, self.settings.ssh_user) as creds:
-            job_env = {**env, **creds}
-            red = self._redactor(cfg, job_env)
-            eng = Engine(cfg, main_dir, self._runner(cfg, main_dir, job_env, red), redactor=red, clock=self.clock)
-            for inv in cfg.inventories:
-                out = eng.drift(sha, inv.name, write_report=self.settings.drift_write_report,
-                                out_dir=self.workspace.root / "drift" / inv.name)
-                results[inv.name] = out.extra
+        for inv in cfg.inventories:
+            held = self.locks.try_acquire(Lock(inv.name, "drift", sha, "schedule", self.clock()))
+            if held:
+                results[inv.name] = {"skipped": "inventory locked"}
+                self.state.record_job({"action": "drift", "trigger": "schedule", "inventory": inv.name,
+                                       "sha": sha, "result": "skipped", "started": self.clock(), "seconds": 0})
+                continue
+            try:
+                # Acquire before any credential minting; PR and operator paths recognize string holders.
+                with job_credentials(self.bao, self.settings.ssh_user) as creds:
+                    job_env = {**env, **creds}
+                    red = self._redactor(cfg, job_env)
+                    eng = Engine(cfg, main_dir, self._runner(cfg, main_dir, job_env, red), redactor=red, clock=self.clock)
+                    out = eng.drift(sha, inv.name, write_report=self.settings.drift_write_report,
+                                    out_dir=self.workspace.root / "drift" / inv.name)
+                    results[inv.name] = out.extra
+            finally:
+                self.locks.release(inv.name, "drift")
         return {"ok": True, "sha": sha[:12], "drift": results}
 
     def _report_error(self, job: Job, error: str) -> None:
