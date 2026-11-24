@@ -186,3 +186,21 @@ more than 10 minutes late is refused; comment again instead.
 Webhook bodies are small, so the cap is 1 MiB (`FERRY_MAX_BODY_BYTES`), chunked bodies are refused
 (411), every socket read and write times out after 15 s, and `BoundedHTTPServer` closes connections
 past 32 at once instead of starting a thread for each. Still meant to sit behind a proxy.
+
+## Comments are pinned to the head they were written about (#12)
+For a non-writer's PR, `/ferry plan` is the vouching step, so it must run what the commenter read,
+not whatever the head is when the worker gets there. `--sha <commit>` names it. Without it, ferry
+needs to know the head as of the comment's `created_at`. GitHub's `issue_comment` carries no head,
+and a commit's dates are the author's to set, so the service records when each head arrived from
+the signed `pull_request` events (`state.head_since`: a new head starts its clock, a repeat of the
+same head doesn't, older events are ignored). GitLab notes carry `merge_request.last_commit`, and
+the MR's diff versions give the server's own arrival time. A head that arrived at or after the
+comment, or with no known arrival (a PR older than the service, unreadable versions), is refused
+with a note that suggests `--sha`. Jobs from comments are `pinned`: if the head moved before the
+worker runs them, they post "not run" and spend nothing. Rejected: comparing commit dates
+(forgeable), and trusting the head at webhook time (the race the issue describes).
+
+## Apply gates before credentials (#13)
+`Engine.apply_precheck` runs `_apply_blockers` (apply_checks, the policy check, the scope compared
+with the plan) with a runner that can't run, and posts the refusal. Only inventories that pass get a
+`job_credentials` block, where `apply()` checks everything again.

@@ -114,12 +114,12 @@ class World:
                 "project": project or {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": attrs, "changes": changes or {}}
 
-    def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None):
+    def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None, head=None):
         return {"object_kind": "note", "user": {"username": user},
                 "project": {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": {"note": note, "noteable_type": noteable, "action": "create",
                                       "created_at": at, "updated_at": updated or at},
-                "merge_request": {"iid": 1, "state": "opened"}}
+                "merge_request": {"iid": 1, "state": "opened", "last_commit": {"id": head or self.sha}}}
 
     def drain(self):
         out = []
@@ -413,3 +413,62 @@ def test_a_replayed_mr_close_releases_nothing(world):
     assert "stale" in world.deliver("Merge Request Hook", world.mr_event("close", at="2027-01-14 08:00:00 UTC"))[1]
     assert world.svc.jobs.empty()
     assert world.deliver("Merge Request Hook", world.mr_event("close"))[1] == "unlock queued"
+
+
+# ---- comments pin the head (#12) and refused applies cost no credentials (#13) -------------------
+
+
+def test_a_note_runs_the_head_it_was_written_against(world):
+    # The hook says the MR head was another commit: the author pushed after the note.
+    assert world.deliver("Note Hook", world.note_event("/ferry plan", head="b" * 40))[1] == \
+        "plan refused: the head isn't the one commented on"
+    assert "moved from `bbbbbbbbbbbb`" in world.notes[-1]["body"] and world.svc.jobs.empty()
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[1] == "plan queued"
+    job = world.svc.jobs.get()
+    assert (job.sha, job.pinned) == (world.sha, True)
+
+
+def test_a_head_that_arrived_after_the_note_is_refused(world):
+    world.gl.routes[("GET", f"{MR}/versions")] = [{"head_commit_sha": world.sha, "created_at": "2027-01-15T08:00:30.000Z"}]
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[1].startswith("plan refused")
+    assert "arrived after the comment" in world.notes[-1]["body"]
+    assert f"--sha {world.sha[:12]}" in world.notes[-1]["body"]
+    # Naming the commit is explicit: it runs that commit, if it's still the head.
+    assert world.deliver("Note Hook", world.note_event(f"/ferry plan --sha {world.sha[:12]}"))[1] == "plan queued"
+    assert world.deliver("Note Hook", world.note_event("/ferry plan --sha 1234567"))[1].startswith("plan refused")
+    assert "names `1234567`" in world.notes[-1]["body"]
+
+
+def test_unreadable_diff_versions_refuse(world):
+    world.gl.routes[("GET", f"{MR}/versions")] = lambda u, d: (500, {"message": "boom"})
+    assert world.deliver("Note Hook", world.note_event("/ferry apply"))[1].startswith("apply refused")
+    assert "hasn't seen when" in world.notes[-1]["body"]
+
+
+def test_a_pinned_job_whose_mr_moved_is_reported_and_runs_nothing(world):
+    assert world.deliver("Note Hook", world.note_event("/ferry plan"))[1] == "plan queued"
+    world.sha = "c" * 40  # a push lands while the job waits in the queue
+    [result] = world.drain()
+    assert "moved from" in result["error"] and not world.runner.requests
+    assert "ferry plan: not run" in world.notes[-1]["body"]
+
+
+def test_a_refused_apply_mints_no_credentials(world, monkeypatch):
+    import contextlib
+    from ferry import service as service_mod
+    minted = []
+
+    @contextlib.contextmanager
+    def creds(bao, ssh_user):
+        minted.append(1)
+        yield {"ANSIBLE_REMOTE_USER": "root"}
+    monkeypatch.setattr(service_mod, "job_credentials", creds)
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    assert len(minted) == 1  # the plan
+    result, reasons = apply_reasons(world, "x1")
+    assert not result["ok"] and any("approval" in r for r in reasons)
+    assert len(minted) == 1 and "ferry apply" in world.notes[-1]["body"]  # refused on the MR, no credentials
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    result, _ = apply_reasons(world, "x2")
+    assert result["ok"] and len(minted) == 2

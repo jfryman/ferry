@@ -22,6 +22,7 @@ SECRET = b"whsec"
 BOT = "ferry-acme[bot]"
 NOW = 1_800_000_000.0
 NOW_ISO = "2027-01-15T08:00:00Z"  # NOW, as GitHub writes timestamps
+OPENED_ISO = "2027-01-15T07:58:00Z"  # when PR 1's head arrived
 
 
 def git(cwd, *args):
@@ -93,6 +94,7 @@ class World:
             runner_factory=self._runner,
             clock=lambda: NOW,
         )
+        self.svc.state.saw_head(1, self.sha, NOW - 120)  # ferry got PR 1's opened event two minutes ago
 
     def _runner(self, checkout, marker, env):
         self.envs.append((checkout, env))
@@ -111,7 +113,7 @@ class World:
         delivery = delivery or f"delivery-{self._n}"
         return self.svc.handle(event, delivery, sign(body), body)
 
-    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None, at=NOW_ISO):
+    def pr_event(self, action="opened", author="pip", draft=False, fork=False, sender=None, at=OPENED_ISO):
         return {"action": action, "repository": {"full_name": "acme/ansible"},
                 "sender": {"login": sender or author},
                 "pull_request": {"number": 1, "draft": draft, "user": {"login": author}, "updated_at": at,
@@ -318,6 +320,7 @@ def test_a_replayed_body_is_a_duplicate_under_any_delivery_id(world):
 def test_seen_deliveries_survive_a_restart(world, tmp_path):
     from ferry.state import SQLiteState
     world.svc.state = SQLiteState(tmp_path / "state.db")
+    world.svc.state.saw_head(1, world.sha, NOW - 120)
     body = json.dumps(world.comment_event("/ferry plan")).encode()
     assert world.svc.handle("issue_comment", "d1", sign(body), body)[1] == "plan queued"
     world.svc.state = SQLiteState(tmp_path / "state.db")  # a new process, same file
@@ -337,7 +340,7 @@ def test_old_comments_are_refused(world, kw, why):
 
 
 def test_recent_comments_pass(world):
-    assert world.deliver("issue_comment", world.comment_event("/ferry plan", at="2027-01-15T07:51:00Z"))[1] == \
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan", at="2027-01-15T07:59:00Z"))[1] == \
         "plan queued"
 
 
@@ -434,3 +437,71 @@ def test_http_caps_concurrent_connections(http):
     import time as _time
     _time.sleep(0.7)  # the stalled ones time out, freeing their slots
     assert b" 200 " in raw(http, b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+
+
+# ---- comments pin the head (#12) and refused applies cost no credentials (#13) -------------------
+
+
+def test_a_comment_runs_the_head_it_was_written_against(world):
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+    job = world.svc.jobs.get()
+    assert (job.sha, job.pinned) == (world.sha, True)
+
+
+def test_a_head_pushed_after_the_comment_is_refused(world):
+    # ferry hears of a push at 07:59:30; the comment was written at 07:59:00, about the old head.
+    old = world.sha
+    world.sha = "b" * 40
+    world.deliver("pull_request", world.pr_event("synchronize", at="2027-01-15T07:59:30Z"))
+    world.svc.jobs.queue.clear()
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan", at="2027-01-15T07:59:00Z"))[1] == \
+        "plan refused: the head isn't the one commented on"
+    assert "arrived after the comment" in world.comments[-1]["body"]
+    assert world.svc.jobs.empty() and old != world.sha
+    # A comment after the push, or one naming the new commit, is about it.
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+    assert world.deliver("issue_comment", world.comment_event(f"/ferry plan --sha {'b' * 12}",
+                                                              at="2027-01-15T07:59:00Z"))[1] == "plan queued"
+
+
+def test_a_head_ferry_never_saw_arrive_is_refused(world):
+    from ferry.state import MemoryState
+    world.svc.state = MemoryState()  # e.g. the PR predates the service
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply"))[1].startswith("apply refused")
+    assert "hasn't seen when" in world.comments[-1]["body"]
+    assert f"/ferry apply --sha {world.sha[:12]}" in world.comments[-1]["body"]
+    assert world.deliver("issue_comment", world.comment_event("/ferry apply --sha 0000000"))[1].startswith(
+        "apply refused")
+    assert world.deliver("issue_comment", world.comment_event(f"/ferry apply --sha {world.sha}"))[1] == "apply queued"
+
+
+def test_a_pinned_job_whose_pr_moved_is_reported_and_runs_nothing(world):
+    assert world.deliver("issue_comment", world.comment_event("/ferry plan"))[1] == "plan queued"
+    world.sha = "c" * 40
+    [result] = world.drain()
+    assert "moved from" in result["error"] and not world.runner.requests
+    assert "ferry plan: not run" in world.comments[-1]["body"]
+
+
+def test_a_refused_apply_mints_no_credentials(world, monkeypatch):
+    import contextlib
+    from ferry import service as service_mod
+    minted = []
+
+    @contextlib.contextmanager
+    def creds(bao, ssh_user):
+        minted.append(1)
+        yield {"ANSIBLE_REMOTE_USER": "root"}
+    monkeypatch.setattr(service_mod, "job_credentials", creds)
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    assert len(minted) == 1
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert not refused["ok"] and any("approval" in r for r in refused["inventories"]["homelab"]["reasons"])
+    assert len(minted) == 1 and "ferry apply" in world.comments[-1]["body"]
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+    assert len(minted) == 2

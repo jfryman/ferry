@@ -11,8 +11,14 @@
 Events:
   pull_request opened/reopened/synchronize/ready_for_review  plan, if the author may (plan rule)
   pull_request closed                                        release the PR's locks
-  issue_comment "/ferry plan [inventory]"                     plan, if the commenter may
-  issue_comment "/ferry apply [inventory]"                    apply (the engine checks every gate)
+  issue_comment "/ferry plan [inventory] [--sha C]"           plan, if the commenter may
+  issue_comment "/ferry apply [inventory] [--sha C]"          apply (the engine checks every gate)
+
+Comment commands are pinned to the head the commenter saw: `--sha` names it; without it, ferry
+uses the PR head as of the comment's created_at, which it knows from the signed pull_request events
+(state.head_since). A head that arrived after the comment, or one ferry hasn't seen arrive, is
+refused with a note; so is a job whose PR moved before the worker got to it. For someone else's PR
+the comment vouches for code the commenter read; this is what makes that vouching hold.
 
 Replays: X-GitHub-Delivery isn't covered by the signature, so a captured body could be resent under
 a new delivery id. ferry remembers both the delivery id and a digest of the signed body in its state
@@ -92,6 +98,17 @@ def delivery_keys(delivery: str, body: bytes) -> list[str]:
     return ([f"id:{delivery}"] if delivery else []) + ["body:" + hashlib.sha256(body).hexdigest()]
 
 
+class _NoRunner:
+    """For the credential-free apply pre-check: it must never run anything."""
+
+    def run(self, req):
+        raise RuntimeError("the apply pre-check must not run ansible")
+
+
+class HeadMoved(Exception):
+    """A pinned job's PR head isn't the commit the comment was about any more."""
+
+
 @dataclass
 class Job:
     action: str  # plan | apply | unlock | drift
@@ -100,6 +117,7 @@ class Job:
     user: str = ""
     inventory: str | None = None
     delivery: str = ""
+    pinned: bool = False  # from a comment: run exactly `sha`, and say so on the PR if it moved
 
 
 @dataclass
@@ -195,11 +213,13 @@ class Service:
 
     def _on_pull_request(self, p: dict, delivery: str) -> tuple[int, str]:
         pr, action = p["pull_request"], p.get("action")
+        number, sha, author = pr["number"], pr["head"]["sha"], pr["user"]["login"]
         # Every action, close included: a replayed `closed` would release an open PR's locks.
         stale = self._stale(pr.get("updated_at"))
         if stale:
             return 202, stale
-        number, sha, author = pr["number"], pr["head"]["sha"], pr["user"]["login"]
+        # When this head arrived, for pinning comments to the head their author saw (#12).
+        self.state.saw_head(number, sha, parse_time(pr["updated_at"]))
         if action == "closed":
             return self._enqueue(Job("unlock", number, sha, author, delivery=delivery))
         if action not in PLAN_ACTIONS:
@@ -231,7 +251,7 @@ class Service:
         stale = self._stale(p["comment"].get("created_at"), p["comment"].get("updated_at"))
         if stale:
             return 202, stale
-        action, inventory = m.group(1), m.group(2)
+        action, inventory, named = m.group(1), m.group(2), m.group(3)
         number = p["issue"]["number"]
         # Both commands need write access, checked here: a refused request never costs a checkout or
         # a credential (the engine checks again, along with every other apply gate).
@@ -239,7 +259,36 @@ class Service:
             self.vcs.post_note(number, f"`/ferry {action}` needs write access to this repo; @{user} doesn't have it.")
             return 202, f"{action} refused: no write access"
         cr = self.vcs.get_change_request(number)
-        return self._enqueue(Job(action, number, cr.head_sha, user, inventory, delivery))
+        sha = self._pin_head(cr, action, parse_time(p["comment"]["created_at"]), named)
+        if sha is None:
+            return 202, f"{action} refused: the head isn't the one commented on"
+        return self._enqueue(Job(action, number, sha, user, inventory, delivery, pinned=True))
+
+    def _head_since(self, number: int, sha: str) -> float | None:
+        """When `sha` became the head of `number` (GitHub: from the pull_request events ferry got)."""
+        return self.state.head_since(number, sha)
+
+    def _pin_head(self, cr, action: str, said_at: float, named: str | None,
+                  payload_head: str | None = None) -> str | None:
+        """The head a comment at `said_at` was about, if it's still the head; else note why and None."""
+        head = cr.head_sha
+        if named:
+            if head.lower().startswith(named.lower()):
+                return head
+            why = f"the comment names `{named[:12]}`, but the {self.noun} head is `{head[:12]}`"
+        elif payload_head and payload_head != head:
+            why = f"the {self.noun} head moved from `{payload_head[:12]}` to `{head[:12]}` since the comment"
+        else:
+            since = self._head_since(cr.id, head)
+            if since is not None and since < said_at:
+                return head
+            why = (f"the {self.noun} head `{head[:12]}` arrived after the comment" if since is not None else
+                   f"ferry hasn't seen when the {self.noun} head `{head[:12]}` arrived, so it can't tell "
+                   "whether the comment was about it")
+        self.vcs.post_note(cr.id, (
+            f"`/ferry {action}` didn't run: {why}. Read the {self.noun}'s latest commits, then comment "
+            f"again, or name the commit you read: `/ferry {action} --sha {head[:12]}`."))
+        return None
 
     def _enqueue(self, job: Job) -> tuple[int, str]:
         try:
@@ -256,7 +305,7 @@ class Service:
         self.vcs.post_note(number, (
             f"ferry doesn't plan automatically for {who} without {self.access} (@{author}): a plan runs "
             f"this {self.noun}'s playbooks against the hosts. Someone with {self.access} can comment "
-            f"`/ferry plan`.\n\n{marker}"))
+            f"`/ferry plan` after reading it (`/ferry plan --sha {sha[:12]}` pins this commit).\n\n{marker}"))
 
     # ---- worker (slow path: one job at a time) --------------------------------------------------
 
@@ -276,6 +325,11 @@ class Service:
         except CheckoutError as e:
             result["error"] = str(e)
             log.warning("job %s for #%s skipped: %s", job.action, job.pr, e)
+            if job.pinned:  # someone asked for this commit: tell them it didn't run
+                self._report_moved(job, str(e))
+        except HeadMoved as e:
+            result["error"] = str(e)
+            self._report_moved(job, str(e))
         except Exception as e:  # report on the PR, keep the service up
             result["error"] = f"{type(e).__name__}: {e}"
             log.exception("job %s for #%s failed", job.action, job.pr)
@@ -305,21 +359,45 @@ class Service:
         return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
                       clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved")
 
+    def _report_moved(self, job: Job, why: str) -> None:
+        try:
+            self.vcs.post_note(job.pr, f"### ferry {job.action}: not run\n\n{why}. Nothing ran against the "
+                                       f"hosts. Read the new commits, then comment `/ferry {job.action}` again.")
+        except Exception:
+            log.exception("couldn't report on #%s", job.pr)
+
     def _plan_or_apply(self, job: Job) -> dict:
+        if job.pinned:
+            head = self.vcs.get_change_request(job.pr).head_sha
+            if head != job.sha:
+                raise HeadMoved(f"the {self.noun} head moved from `{job.sha[:12]}` to `{head[:12]}` "
+                                f"after the `/ferry {job.action}` comment")
         main_dir, _ = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")  # from the default branch, never the PR
         checkout = self.workspace.pull_request(job.pr, job.sha)
         try:
             env = self.workspace.collections(checkout)
-            with job_credentials(self.bao, self.settings.ssh_user) as creds:
-                eng = self._engine(cfg, checkout, {**env, **creds})
-                invs = [job.inventory] if job.inventory else [i.name for i in cfg.inventories]
-                outcomes = {}
+            invs = [job.inventory] if job.inventory else [i.name for i in cfg.inventories]
+            outcomes = {}
+            if job.action == "apply":
+                # Every apply gate first, without credentials: a refused apply (no approval, a stale
+                # plan) costs no OpenBao login and no certificate. apply() checks again with them.
+                pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
+                             clock=self.clock)
                 for inv in invs:
-                    out = eng.plan(job.pr, job.sha, job.user, inv) if job.action == "plan" else \
-                        eng.apply(job.pr, job.sha, job.user, inv)
-                    outcomes[inv] = {"ok": out.ok, "reasons": out.reasons}
-            return {"ok": all(o["ok"] for o in outcomes.values()), "inventories": outcomes}
+                    out = pre.apply_precheck(job.pr, job.sha, job.user, inv)
+                    if out is not None:
+                        outcomes[inv] = {"ok": False, "reasons": out.reasons}
+            todo = [inv for inv in invs if inv not in outcomes]
+            if todo:
+                with job_credentials(self.bao, self.settings.ssh_user) as creds:
+                    eng = self._engine(cfg, checkout, {**env, **creds})
+                    for inv in todo:
+                        out = eng.plan(job.pr, job.sha, job.user, inv) if job.action == "plan" else \
+                            eng.apply(job.pr, job.sha, job.user, inv)
+                        outcomes[inv] = {"ok": out.ok, "reasons": out.reasons}
+            return {"ok": all(o["ok"] for o in outcomes.values()),
+                    "inventories": {inv: outcomes[inv] for inv in invs}}
         finally:
             self.workspace.discard(checkout)
 

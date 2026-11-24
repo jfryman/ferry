@@ -173,6 +173,11 @@ class GitLabBackend:
                     "Enable 'Remove all approvals when commits are added' to fix this.", cr_id)
         return []
 
+    def head_arrived_at(self, cr_id: int, sha: str) -> float | None:
+        """When `sha` last became the MR's head, as epoch seconds (GitLab's own diff versions)."""
+        t = self._head_arrived(cr_id, sha)
+        return t.timestamp() if t else None
+
     def _head_arrived(self, cr_id: int, sha: str) -> datetime | None:
         """When `sha` last became the MR's head (newest diff version with that head)."""
         times = [_ts(v["created_at"]) for v in self.client.paged(f"{self._p}/merge_requests/{cr_id}/versions")

@@ -209,18 +209,31 @@ class Engine:
                 reasons.append(f"latest plan is {age_h:.1f}h old (max {self.cfg.apply.max_plan_age_hours}h): re-run the plan")
         return reasons, plan
 
-    def apply(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome:
+    def _apply_blockers(self, cr_id: int, sha: str, user: str, inventory: str) -> tuple[list[str], dict | None]:
+        """Every reason not to apply (apply_checks, the policy, the plan's scope); no runner needed."""
         assert self.vcs is not None
-        inv = self.cfg.inventory(inventory)
         violations = self.policy_check()
-        reasons, plan = self.apply_checks(cr_id, sha, user, inv.name)
+        reasons, plan = self.apply_checks(cr_id, sha, user, inventory)
         if violations:
             reasons += ["policy check failed:"] + violations
         if plan is not None and not reasons:
             # Recompute scope at this SHA: it must be exactly what was planned.
-            sc = self.scope_for(self.vcs.changed_files(cr_id), inv.name)
+            sc = self.scope_for(self.vcs.changed_files(cr_id), inventory)
             if sc.limit != plan.get("limit") or sc.empty != bool(plan.get("noop")):
                 reasons.append("scope differs from the plan's: re-run the plan")
+        return reasons, plan
+
+    def apply_precheck(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome | None:
+        """The apply gates alone, before anything is spent on the run (credentials, a certificate):
+        the refusal (posted, as apply would) if any gate fails, else None. apply() checks again."""
+        inv = self.cfg.inventory(inventory)
+        reasons, _ = self._apply_blockers(cr_id, sha, user, inv.name)
+        return self._refuse("apply", cr_id, inv.name, sha, reasons) if reasons else None
+
+    def apply(self, cr_id: int, sha: str, user: str, inventory: str | None = None) -> Outcome:
+        assert self.vcs is not None
+        inv = self.cfg.inventory(inventory)
+        reasons, plan = self._apply_blockers(cr_id, sha, user, inv.name)
         if reasons:
             return self._refuse("apply", cr_id, inv.name, sha, reasons)
         assert plan is not None

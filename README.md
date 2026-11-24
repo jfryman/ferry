@@ -133,10 +133,19 @@ sequenceDiagram
   authors with write access, and for pushes from users with write access. Anyone else's PR (or
   push into a PR) waits for `/ferry plan` from someone with write access. Drafts and fork PRs
   aren't planned.
+- **A comment runs the commit it was written about.** `/ferry plan` and `/ferry apply` are pinned
+  to the PR head as of the comment's `created_at`, which ferry knows from the signed
+  `pull_request` events it received. A head that arrived after the comment, or one ferry never saw
+  arrive (a PR older than the service), is refused with a note. `/ferry plan --sha <commit>` names
+  the commit outright. If the PR moves while the job is queued, the job doesn't run and says so.
+  For someone else's PR the comment vouches for code the commenter read, so it has to be that
+  code.
 - **Host keys are checked** (the image sets `ANSIBLE_HOST_KEY_CHECKING=True`). Mount known_hosts at
   `/etc/ssh/ssh_known_hosts` in the container that runs the playbooks: pinned keys, or
   `@cert-authority` lines for OpenBao-signed host certificates.
 - **Apply** is `/ferry apply [inventory]` and passes every gate above, against live GitHub state.
+  The gates run before any credential is minted, so a refused apply costs no OpenBao login and no
+  certificate; they run again once the credentials exist.
 - **Per-job credentials** (optional, `FERRY_OPENBAO_*`): an OpenBao token from the service's
   workload identity, a throwaway ed25519 key signed by OpenBao's SSH CA, and the ansible-vault
   password; all removed and the token revoked when the job ends.
@@ -201,6 +210,9 @@ time, so the webhook must use HTTPS. Retries are deduped on `Idempotency-Key` (o
   automatically only for MR authors with Developer+; anyone else's MR gets one note and waits for
   `/ferry plan` from a Developer. Drafts and fork MRs (source project != target project) aren't
   planned automatically. Close or merge releases the MR's locks.
+- **Notes are pinned to the head the commenter saw**, as on GitHub: the hook's
+  `merge_request.last_commit` must still be the MR head, and that head's diff version must predate
+  the note (`--sha <commit>` names it instead).
 - **Apply** is `/ferry apply [inventory]`, with every gate above. Approvals count only for the
   current head: GitLab doesn't record which commit an approval was for, so ferry counts an approval
   only if its `approved_at` is at or after the moment the head arrived (the MR diff version whose
