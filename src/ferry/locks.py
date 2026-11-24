@@ -30,7 +30,7 @@ TAG_PREFIX = "ferry-lock-"
 @dataclass
 class Lock:
     key: str
-    holder: int  # change request id
+    holder: int | str  # change request id, or run:<id> (<subject>)
     sha: str
     user: str
     since: float

@@ -413,6 +413,8 @@ def raw(addr, data: bytes, wait=2.0) -> bytes:
         try:
             while chunk := s.recv(4096):
                 out += chunk
+        except ConnectionResetError:
+            return out  # macOS resets an intentionally rejected connection
         except TimeoutError:
             return out + b"<no hangup>"
         return out  # the server closed the connection
@@ -587,7 +589,9 @@ def test_metrics_and_job_history(world, http):
     jobs = json.loads(text)["jobs"]
     assert ctype == "application/json" and [j["action"] for j in jobs] == ["apply", "plan"]
     assert jobs[0] == {"id": 2, "action": "apply", "pr": 1, "sha": world.sha[:12], "user": "james",
-                       "inventory": None, "result": "refused", "started": NOW, "seconds": 0.0}
+                       "inventory": None, "result": "refused", "started": NOW, "seconds": 0.0,
+                       "trigger": "webhook", "run_id": None, "subject": None, "limit": None,
+                       "mode": None, "certificate_serial": None, "counts": None}
     world.svc.jobs.put(Job("unlock", 1, world.sha, "pip"))
     world.closed = True
     world.drain()

@@ -126,6 +126,8 @@ class Engine:
         # closed/merged, or a 404/410 for a deleted one. Any other error (timeout, 5xx, rate limit,
         # expired token) keeps the holder's lock: the lock is what stops two changes interleaving.
         stale = False
+        if isinstance(held.holder, str):
+            return f"inventory `{inventory}` is locked by {held.holder}"
         if held.holder and self.vcs is not None:
             try:
                 stale = not self.vcs.get_change_request(held.holder).open

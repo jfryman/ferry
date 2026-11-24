@@ -200,6 +200,11 @@ class Settings:
     allow_commands: tuple = ("plan", "apply")
     disable_autoplan: bool = False
     switch_dir: str | None = None
+    run_oidc_issuer: str | None = None
+    run_oidc_audience: str | None = None
+    run_allowed_subjects: tuple = ()
+    run_allowed_groups: tuple = ()
+    run_lease_seconds: float = 300.0
 
 
 @dataclass
@@ -224,6 +229,12 @@ class Service:
         self.jobs: "queue.Queue[Job | None]" = queue.Queue(maxsize=self.settings.max_queued_jobs)
         self.last_job: dict = {}
         self._job_red: Redactor | None = None  # the running job's redactor, for its error report
+        self.runs = None
+        if self.settings.run_oidc_issuer and self.settings.run_oidc_audience:
+            from .runs import Runs
+            if self.settings.run_lease_seconds <= 0:
+                raise ValueError('run lease must be positive')
+            self.runs = Runs(self)
         self._status_off = False  # the code host refused a status for lack of permission: stop trying
         self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
 
@@ -574,6 +585,8 @@ class Service:
     # ---- worker (slow path: one job at a time) --------------------------------------------------
 
     def run_job(self, job: Job) -> dict:
+        if self.runs:
+            self.runs.expire()
         started = self.clock()
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
@@ -622,10 +635,12 @@ class Service:
         self.last_job = result
         log.info("job done: %s", result)
         try:
-            self.metrics.job_done(job.action, result["result"], finished - started, finished)
+            self.metrics.job_done(job.action, result["result"], finished - started, finished,
+                                  trigger="schedule" if job.action == "drift" else "webhook")
             self.state.record_job({"action": job.action, "pr": job.pr or None, "sha": job.sha[:12] or None,
                                    "user": job.user or None, "inventory": job.inventory,
-                                   "result": result["result"], "started": started, "seconds": result["seconds"]})
+                                   "result": result["result"], "started": started, "seconds": result["seconds"],
+                                   "trigger": "webhook" if job.action != "drift" else "schedule"})
         except Exception:  # bookkeeping never fails a job
             log.exception("couldn't record job %s for #%s", job.action, job.pr)
         return result
@@ -739,6 +754,14 @@ class Service:
                         culprit, why = inv, "was refused"
                         break  # in order: what comes after a refused inventory doesn't run (#27)
             todo = invs[: invs.index(culprit)] if culprit else list(invs)
+            if todo and job.action == "plan":
+                # Plans also must acquire before credentials: a CLI holder is never a PR to query.
+                pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, clock=self.clock)
+                for inv in todo:
+                    reason = pre._lock_conflict(inv, job.pr, job.sha, job.user)
+                    if reason:
+                        self._report_not_run(job, reason)
+                        return {"ok": False, "inventories": {inv: {"ok": False, "reasons": [reason]}}}
             if todo:
                 if job.action == "plan":
                     for inv in todo:
@@ -871,7 +894,8 @@ def make_handler(service: Service, max_body: int | None = None):
             self._send(status, text)
 
         def do_POST(self):
-            if self.path != "/webhook":
+            is_run = self.path == "/api/runs" or self.path.startswith("/api/runs/")
+            if self.path != "/webhook" and not (is_run and service.runs):
                 return self._send(404, "not found")
             if self.headers.get("Transfer-Encoding"):
                 self.close_connection = True
@@ -886,6 +910,9 @@ def make_handler(service: Service, max_body: int | None = None):
             body = self.rfile.read(length)
             if len(body) != length:
                 return  # the client went away mid-body
+            if is_run:
+                status, data = service.runs.request(self.path, self.headers, body)
+                return self._send(status, json.dumps(data), "application/json")
             status, text = service.receive(self.headers, body)
             self._send(status, text)
 
@@ -927,6 +954,14 @@ def serve(service: Service, host: str = "0.0.0.0", port: int = 8080) -> None:
     stop = threading.Event()
     threading.Thread(target=service.worker, args=(stop,), daemon=True, name="ferry-worker").start()
     threading.Thread(target=service.drift_scheduler, args=(stop,), daemon=True, name="ferry-drift").start()
+    def expire_runs():
+        while not stop.wait(1):
+            if service.runs:
+                try:
+                    service.runs.expire()
+                except Exception:
+                    log.error('run lease cleanup unavailable')
+    threading.Thread(target=expire_runs, daemon=True, name='ferry-leases').start()
     httpd = BoundedHTTPServer((host, port), make_handler(service), service.settings.max_connections)
     log.info("ferry service for %s listening on %s:%s", service.settings.repo, host, port)
     try:
