@@ -62,6 +62,7 @@ from .sanitize import Redactor
 from . import __version__
 from .metrics import Metrics, reject_reason
 from .state import MemoryState
+from .vcs.base import Note
 from .vcs.github import GitHubBackend
 from .webhook import classify_command
 from .galaxy import collections_path as galaxy_path
@@ -165,6 +166,28 @@ class Job:
     inventory: str | None = None
     delivery: str = ""
     pinned: bool = False  # from a comment: run exactly `sha`, and say so on the PR if it moved
+    comment_id: int = 0  # the comment that asked for it, if any (ferry reacts to it, #89)
+    base: str = ""  # automatic plans: the change's base branch, as the webhook said
+    # The ack (#89): the comment posted when the job was queued, edited as it runs and replaced by its
+    # first result. `id` is the job's row in the state file, `seq` its place in the queue.
+    id: int = 0
+    seq: int = 0
+    ack: int = 0
+    ack_used: bool = False  # the ack now holds a result
+    posted: bool = False  # a result went to a new comment
+
+
+class _JobVCS:
+    """The code host as a running job's engine sees it: the job's first comment replaces its ack."""
+
+    def __init__(self, svc: "Service", job: Job):
+        self._svc, self._job = svc, job
+
+    def __getattr__(self, name):
+        return getattr(self._svc.vcs, name)
+
+    def post_note(self, cr_id: int, body: str):
+        return self._svc._post_result(self._job, cr_id, body)
 
 
 @dataclass
@@ -245,6 +268,16 @@ class Service:
             self.runs = Runs(self)
         self._status_off = False  # the code host refused a status for lack of permission: stop trying
         self._running: dict[tuple, str] = {}  # statuses this job set to running: (sha, kind, inv) -> kind
+        # Acks (#89): posted and queued under one mutex, so the acks on a PR are in queue order and an
+        # edited result sits where a new comment would have. A result that has to go to a new
+        # comment (an edit failed, a second inventory) is newer than the acks of every job queued
+        # before it: `_fence[pr]` is the last such seq, and those jobs post new comments too. That
+        # keeps "the newest plan or unlock comment" the one that ran last.
+        self._enqueue_mutex = threading.Lock()
+        self._seq = 0
+        self._fence: dict[int, int] = {}
+        self._inventories: tuple = ()  # from the last ferry.yaml a job loaded: for "queued" statuses
+        self._bases: frozenset = frozenset({self.settings.default_branch})  # and the bases it handles
 
     def recover_drift(self):
         """One recovery per service lifetime, never reap this process's own live drift.
@@ -342,9 +375,16 @@ class Service:
             return
         key = (sha, kind, inv)
         if state == "running":
+            if key in self._running:  # already says so
+                return
             self._running[key] = kind
         else:
             self._running.pop(key, None)
+        self._post_status(sha, kind, inv, state, description)
+
+    def _post_status(self, sha: str, kind: str, inv: str, state: str, description: str) -> None:
+        if not self.settings.commit_status or self._status_off or not sha:
+            return
         try:
             self.vcs.set_status(sha, f"ferry/{kind}: {inv}", state, description)
         except Exception as e:
@@ -467,7 +507,8 @@ class Service:
         if action == "synchronize" and pusher != author and not self.vcs.can_apply(pusher):
             self._say_waiting(number, sha, pusher, who="pushes from users")
             return 202, "waiting for /ferry plan"
-        return self._enqueue(Job("plan", number, sha, author, delivery=delivery))
+        return self._enqueue(Job("plan", number, sha, author, delivery=delivery,
+                                 base=str((pr.get("base") or {}).get("ref") or "")))
 
     def _on_comment(self, p: dict, delivery: str) -> tuple[int, str]:
         if p.get("action") != "created" or "pull_request" not in p.get("issue", {}):
@@ -490,7 +531,7 @@ class Service:
             dispatch = lambda: self._on_command(p, m, delivery)  # noqa: E731
         else:
             dispatch = lambda: self._on_other_command(  # noqa: E731
-                p["issue"]["number"], user, kind, m, body.strip().splitlines()[0], delivery)
+                p["issue"]["number"], user, kind, m, body.strip().splitlines()[0], delivery, comment_id=cid)
         return self._once(self._comment_key("comment", self.settings.repo.lower(), cid), dispatch)
 
     # ---- /ferry unlock, /ferry help, and commands that don't parse (#30) -------------------------
@@ -498,7 +539,7 @@ class Service:
     HELP_INTERVAL = 600  # at most one help reply per PR per 10 minutes: it can't make ferry spam
 
     def _on_other_command(self, number: int, user: str, kind: str, m, first_line: str,
-                          delivery: str) -> tuple[int, str]:
+                          delivery: str, comment_id: int = 0) -> tuple[int, str]:
         if kind in ("help", "bad"):
             now = self.clock()
             key = f"help:{self.settings.repo.lower()}:{number}:{int(now // self.HELP_INTERVAL)}"
@@ -514,7 +555,8 @@ class Service:
         if not self._open_or_say(cr, "unlock"):
             return 202, f"unlock refused: {self.noun} is {cr.state}"
         # Through the queue: never while a plan or apply of this ferry runs, and in the job history.
-        return self._enqueue(Job("unlock", number, cr.head_sha, user, m.group(1), delivery, pinned=True))
+        return self._enqueue(Job("unlock", number, cr.head_sha, user, m.group(1), delivery, pinned=True,
+                                 comment_id=comment_id))
 
     def _on_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
         action, inventory, named = m.group(1), m.group(2), m.group(3)
@@ -535,7 +577,8 @@ class Service:
         sha = self._pin_head(cr, action, parse_time(p["comment"]["created_at"]), named)
         if sha is None:
             return 202, f"{action} refused: the head isn't the one commented on"
-        return self._enqueue(Job(action, number, sha, user, inventory, delivery, pinned=True))
+        return self._enqueue(Job(action, number, sha, user, inventory, delivery, pinned=True,
+                                 comment_id=p["comment"]["id"]))
 
     @staticmethod
     def _comment_key(kind: str, where, cid: int) -> str:
@@ -590,13 +633,155 @@ class Service:
         return None
 
     def _enqueue(self, job: Job) -> tuple[int, str]:
-        try:
-            self.jobs.put_nowait(job)
-        except queue.Full:
-            log.warning("queue full (%s jobs): dropped %s for #%s", self.jobs.maxsize, job.action, job.pr)
-            return 503, "queue full, try again later"
+        with self._enqueue_mutex:  # the only producer section: a job and its ack go in in the same order
+            if self.jobs.full():
+                log.warning("queue full (%s jobs): dropped %s for #%s", self.jobs.maxsize, job.action, job.pr)
+                return 503, "queue full, try again later"
+            self._seq += 1
+            job.seq = self._seq
+            if self._acked(job):
+                self._open_ack(job)
+            self.jobs.put_nowait(job)  # not full, and only this section puts
         self.metrics.inc("ferry_jobs_queued_total", action=job.action)
+        if job.ack:
+            self._queued_statuses(job)
+        if job.comment_id:
+            try:
+                self.vcs.react(job.pr, job.comment_id, "eyes")
+            except Exception as e:  # best effort: a reaction is a courtesy
+                log.info("couldn't react to the comment on #%s (%s)", job.pr, type(e).__name__)
         return 202, f"{job.action} queued"
+
+    # ---- acks (#89) -----------------------------------------------------------------------------
+
+    def _acked(self, job: Job) -> bool:
+        """Jobs that say something on the change get an ack: plans, applies, `/ferry unlock`."""
+        if not job.pr:
+            return False
+        if job.action == "unlock":
+            return job.pinned
+        # An automatic plan for a change into a branch ferry doesn't handle ends without a word: no ack
+        # either. Bases from the last ferry.yaml loaded; the default branch before that.
+        return job.action in COMMANDS and (job.pinned or not job.base or job.base in self._bases)
+
+    def _ack_body(self, job: Job, state: str, note: str = "") -> str:
+        return render.ack_comment(job.action, job.inventory, job.sha, state, job.id or None, note)
+
+    def _open_ack(self, job: Job) -> None:
+        """A row in the job history and the ack comment. Neither may stop the job: without an ack,
+        its results are new comments, as before #89."""
+        try:
+            job.id = self.state.open_job({"action": job.action, "pr": job.pr, "sha": job.sha[:12] or None,
+                                          "user": job.user or None, "inventory": job.inventory,
+                                          "started": self.clock(), "trigger": "webhook"})
+        except Exception:
+            log.exception("couldn't record queued job %s for #%s", job.action, job.pr)
+        ahead = self.jobs.qsize()
+        note = f"{ahead} job(s) ahead of it." if ahead else ""
+        try:
+            job.ack = self.vcs.post_note(job.pr, self._ack_body(job, "queued", note)).id
+        except Exception as e:
+            log.warning("couldn't post the ack on #%s (%s); the result will be a new comment",
+                        job.pr, type(e).__name__)
+            return
+        if job.id:
+            try:
+                self.state.update_job(job.id, {"ack": job.ack})
+            except Exception:
+                log.exception("couldn't store the ack of job %s", job.id)
+
+    def _queued_statuses(self, job: Job) -> None:
+        """`pending: queued` for the inventories this job will run, where ferry knows them (#89)."""
+        if job.action not in COMMANDS:
+            return
+        known = self._inventories
+        for inv in ([job.inventory] if job.inventory else known):
+            if inv in known:
+                self._post_status(job.sha, job.action, inv, "pending", "queued")
+
+    def _edit_ack(self, job: Job, body: str) -> bool:
+        """Replace the ack's body; False (and the ack forgotten) if the code host won't."""
+        if not job.ack:
+            return False
+        try:
+            self.vcs.edit_note(job.pr, job.ack, body)
+            return True
+        except Exception as e:
+            log.warning("couldn't edit the ack on #%s (%s%s); posting a new comment instead", job.pr,
+                        type(e).__name__, f", HTTP {e.status}" if getattr(e, "status", None) else "")
+            job.ack = 0
+            return False
+
+    def _post_result(self, job: Job, cr_id: int, body: str):
+        """What a running job says on its change: the first result replaces the ack, unless a comment
+        posted since the ack would then be newer than it (see _fence). Everything else, and an edit
+        the code host refuses, is a new comment."""
+        if cr_id == job.pr and job.ack and not job.ack_used and job.seq > self._fence.get(cr_id, 0):
+            if self._edit_ack(job, body):
+                job.ack_used = True
+                return Note(job.ack, self.vcs.bot_username(), body)
+        note = self.vcs.post_note(cr_id, body)
+        if cr_id == job.pr:
+            job.posted = True
+        self._fence[cr_id] = self._seq  # read after the post: every ack older than it is fenced
+        return note
+
+    def _learn(self, cfg) -> None:
+        """What acks and "queued" statuses need to know of ferry.yaml before a job loads it."""
+        self._inventories = tuple(i.name for i in cfg.inventories)
+        self._bases = frozenset({self.settings.default_branch, *cfg.base_branches})
+
+    def _start_ack(self, job: Job) -> None:
+        if job.id:
+            try:
+                self.state.update_job(job.id, {"result": "running"})
+            except Exception:
+                log.exception("couldn't mark job %s running", job.id)
+        if job.ack:
+            self._edit_ack(job, self._ack_body(job, "running"))
+        for inv in ([job.inventory] if job.inventory else self._inventories):
+            if job.action in COMMANDS and inv in self._inventories:
+                self._status(job.sha, job.action, inv, "running", "running")
+
+    def _close_ack(self, job: Job, result: dict) -> None:
+        """An ack no result replaced says how the job ended."""
+        if not job.ack or job.ack_used:
+            return
+        if job.posted:
+            body = self._ack_body(job, "done", "The result is in the comment below.")
+        elif result.get("skipped") is True and not job.pinned:
+            why = ("automatic plans were switched off while it waited" if result.get("error") == "autoplan disabled"
+                   else f"the {self.noun} moved on, was closed, or isn't one ferry plans")
+            body = self._ack_body(job, "skipped", f"Nothing ran: {why}.")
+        elif result.get("result") == "ok":
+            body = self._ack_body(job, "done")
+        else:
+            body = self._ack_body(job, "stopped", "ferry didn't report a result; check the service log.")
+        self._edit_ack(job, body)
+
+    def recover_acks(self) -> None:
+        """At startup: jobs the last run of the service queued or started but never finished (it was
+        stopped). Their acks say so, and their rows are closed as errors."""
+        try:
+            rows = self.state.unfinished_jobs()
+        except Exception:
+            log.exception("couldn't read unfinished jobs")
+            return
+        for row in rows:
+            job = Job(row["action"] or "", int(row["pr"] or 0), str(row["sha"] or ""),
+                      inventory=row["inventory"], id=row["id"], ack=int(row["ack"] or 0))
+            if row["result"] == "running":
+                note = ("ferry restarted while this job ran, so it may have stopped part-way. Check the "
+                        f"service log, then run `/ferry {job.action}` again.")
+            else:
+                note = f"ferry restarted before this job ran. Nothing ran: comment `/ferry {job.action}` to run it."
+            if job.ack and job.pr:
+                self._edit_ack(job, self._ack_body(job, "stopped", note))
+            try:
+                self.state.update_job(job.id, {"result": "error"})
+            except Exception:
+                log.exception("couldn't close job %s", job.id)
+            log.warning("job %s (%s for #%s) didn't finish before the restart", job.id, job.action, job.pr)
 
     def _say_waiting(self, number: int, sha: str, author: str, who: str = "authors") -> None:
         marker = f"{WAITING_MARKER} {sha} -->"
@@ -617,6 +802,8 @@ class Service:
         result = {"job": job.action, "pr": job.pr, "sha": job.sha[:12], "ok": False}
         self._job_red = None
         self._running = {}
+        if self._acked(job):
+            self._start_ack(job)
         try:
             off = self._disabled(job.action) if job.action in COMMANDS else None
             if job.action == "plan" and not job.pinned and not self.switches()["autoplan"]:
@@ -655,18 +842,32 @@ class Service:
                 self._status(sha, kind, inv, "error", f"ferry couldn't finish the {kind}")
             if job.pr and job.action in ("plan", "apply"):
                 self._report_error(job, result["error"])
+        # Statuses this job set to running that nothing resolved (it stopped before that inventory).
+        for (sha, kind, inv) in list(self._running):
+            if kind == "apply":
+                self._status(sha, kind, inv, "pending", "not applied")
+            else:
+                self._status(sha, kind, inv, "failure", "not run")
         finished = self.clock()
         result["seconds"] = round(finished - started, 1)
         result["result"] = job_result(result)
+        try:
+            self._close_ack(job, result)
+        except Exception:  # an ack never fails a job
+            log.exception("couldn't close the ack of job %s for #%s", job.action, job.pr)
         self.last_job = result
         log.info("job done: %s", result)
         try:
             self.metrics.job_done(job.action, result["result"], finished - started, finished,
                                   trigger="schedule" if job.action == "drift" else "webhook")
-            self.state.record_job({"action": job.action, "pr": job.pr or None, "sha": job.sha[:12] or None,
-                                   "user": job.user or None, "inventory": job.inventory,
-                                   "result": result["result"], "started": started, "seconds": result["seconds"],
-                                   "trigger": "webhook" if job.action != "drift" else "schedule"})
+            row = {"action": job.action, "pr": job.pr or None, "sha": job.sha[:12] or None,
+                   "user": job.user or None, "inventory": job.inventory,
+                   "result": result["result"], "started": started, "seconds": result["seconds"],
+                   "trigger": "webhook" if job.action != "drift" else "schedule"}
+            if job.id:  # opened when it was queued (#89)
+                self.state.update_job(job.id, {**row, "ack": job.ack or None})
+            else:
+                self.state.record_job(row)
         except Exception:  # bookkeeping never fails a job
             log.exception("couldn't record job %s for #%s", job.action, job.pr)
         return result
@@ -691,10 +892,10 @@ class Service:
             released = sorted(self.locks.release_all(job.pr))
         if not released:
             what = f"the lock on `{job.inventory}`" if job.inventory else "any inventory lock"
-            self.vcs.post_note(job.pr, f"`/ferry unlock`: this {self.noun} doesn't hold {what}. Nothing changed.")
+            self._post_result(job, job.pr, f"`/ferry unlock`: this {self.noun} doesn't hold {what}. Nothing changed.")
             return {"ok": False, "inventories": {job.inventory or "*": {"ok": False, "reasons": ["no lock held"]}}}
         for inv in released:
-            self.vcs.post_note(job.pr, render.unlock_comment(inv, job.user, self.clock(), self.marker_key()))
+            self._post_result(job, job.pr, render.unlock_comment(inv, job.user, self.clock(), self.marker_key()))
         log.info("#%s: %s released %s with /ferry unlock", job.pr, job.user, ", ".join(released))
         return {"ok": True, "released": released}
 
@@ -723,9 +924,10 @@ class Service:
                 runner.timeout = self.settings.job_timeout_minutes * 60
         return runner
 
-    def _engine(self, cfg, checkout: Path, env: dict) -> Engine:
+    def _engine(self, cfg, checkout: Path, env: dict, job: Job | None = None) -> Engine:
         red = self._redactor(cfg, env)
-        return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), self.vcs, self.locks, red,
+        vcs = _JobVCS(self, job) if job is not None else self.vcs
+        return Engine(cfg, checkout, self._runner(cfg, checkout, env, red), vcs, self.locks, red,
                       clock=self.clock, apply_how="comment `/ferry apply` once the PR is approved",
                       default_branch=self.settings.default_branch, marker_key=self.marker_key(),
                       pushers=self.state.pushers)
@@ -736,7 +938,7 @@ class Service:
 
     def _report_not_run(self, job: Job, text: str) -> None:
         try:
-            self.vcs.post_note(job.pr, f"### ferry {job.action}: not run\n\n{text}")
+            self._post_result(job, job.pr, f"### ferry {job.action}: not run\n\n{text}")
         except Exception:
             log.exception("couldn't report on #%s", job.pr)
 
@@ -752,6 +954,7 @@ class Service:
         main_dir, _ = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")  # from the default branch, never the PR
         self._redactor(cfg, {})  # the error report masks ferry.yaml's patterns from here on
+        self._learn(cfg)
         # Only PRs into the default branch or ferry.yaml's base_branches (#22): checked before the PR
         # is checked out or any credential exists. The engine checks again against live state.
         why = Engine(cfg, main_dir, _NoRunner(), default_branch=self.settings.default_branch).base_reason(cr)
@@ -766,7 +969,7 @@ class Service:
             if job.action == "apply":
                 # Every apply gate first, without credentials: a refused apply (no approval, a stale
                 # plan) costs no OpenBao login and no certificate. apply() checks again with them.
-                pre = Engine(cfg, checkout, _NoRunner(), self.vcs, self.locks, self._redactor(cfg, env),
+                pre = Engine(cfg, checkout, _NoRunner(), _JobVCS(self, job), self.locks, self._redactor(cfg, env),
                              clock=self.clock, default_branch=self.settings.default_branch,
                              marker_key=self.marker_key(), pushers=self.state.pushers)
                 bare = pre.bare_apply_reason(job.inventory)
@@ -791,15 +994,15 @@ class Service:
             if todo:
                 if job.action == "plan":
                     for inv in todo:
-                        self._status(job.sha, "plan", inv, "running", "planning")
+                        self._status(job.sha, "plan", inv, "running", "running")
                 with job_credentials(self.bao, self.settings.ssh_user) as creds:
-                    eng = self._engine(cfg, checkout, {**env, **creds})
+                    eng = self._engine(cfg, checkout, {**env, **creds}, job)
                     for inv in todo:
                         if job.action == "plan":
                             out = eng.plan(job.pr, job.sha, job.user, inv)
                             self._plan_status(job.sha, inv, out)
                         else:
-                            self._status(job.sha, "apply", inv, "running", "applying")
+                            self._status(job.sha, "apply", inv, "running", "running")
                             out = eng.apply(job.pr, job.sha, job.user, inv)
                             self._apply_status(job.sha, inv, out, job.user)
                         outcomes[inv] = {"ok": out.ok, "reasons": out.reasons}
@@ -811,7 +1014,7 @@ class Service:
                 outcomes[inv] = {"ok": False, "reasons": [f"not run: `{culprit}` {why}"]}
             if skipped:
                 names = ", ".join(f"`{i}`" for i in skipped)
-                self.vcs.post_note(job.pr, (
+                self._post_result(job, job.pr, (
                     f"### ferry apply: {names} not run\n\n`{culprit}` {why}, and ferry stops at the first "
                     f"inventory that doesn't apply. Nothing ran against {names}. Fix `{culprit}`, then apply "
                     "again, or name an inventory: " + ", ".join(f"`/ferry apply {i}`" for i in skipped) + "."))
@@ -839,6 +1042,7 @@ class Service:
             return {"ok": True, "skipped": "waiting for executor idle recovery"}
         main_dir, sha = self.workspace.main(self.settings.default_branch)
         cfg = config_mod.load(main_dir / "ferry.yaml")
+        self._learn(cfg)
         env = self._collections(main_dir)
         results = {}
         for inv in cfg.inventories:
@@ -866,7 +1070,7 @@ class Service:
         # job failed before it had one, the built-in patterns and the service's environment.
         red = self._job_red or Redactor([], [], [])
         try:
-            self.vcs.post_note(job.pr, f"### ferry {job.action}: error\n\nferry couldn't finish: "
+            self._post_result(job, job.pr, f"### ferry {job.action}: error\n\nferry couldn't finish: "
                                        f"`{red.text(error)[:500]}`. Check the service log, then try "
                                        f"`/ferry {job.action}` again.")
         except Exception:
@@ -990,6 +1194,7 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
 
 def serve(service: Service, host: str = "0.0.0.0", port: int = 8080) -> None:
+    service.recover_acks()  # before the worker: jobs the last run left queued or running (#89)
     stop = threading.Event()
     threading.Thread(target=service.worker, args=(stop,), daemon=True, name="ferry-worker").start()
     threading.Thread(target=service.drift_scheduler, args=(stop,), daemon=True, name="ferry-drift").start()

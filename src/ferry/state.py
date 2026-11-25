@@ -25,6 +25,9 @@ JOB_HISTORY = 200
 # What the job history keeps: no error text or refusal reasons (they can name internal hosts and
 # paths, and the history is served unauthenticated); those are on the PR and in the service log.
 JOB_FIELDS = ("id", "action", "pr", "sha", "user", "inventory", "result", "started", "seconds", "trigger", "run_id", "subject", "limit", "mode", "certificate_serial", "counts", "display_name", "playbook", "reason")
+# A job opened when it was queued (#89) carries one of these results until it finishes. /jobs lists
+# finished jobs only; the ack comment's id is stored with the row and never served.
+UNFINISHED = ("queued", "running")
 
 
 class MemoryState:
@@ -96,10 +99,29 @@ class MemoryState:
             del self._jobs[:-self.job_history]
             return row["id"]
 
-    def jobs(self, limit: int = 50) -> list[dict]:
-        """The newest jobs first."""
+    def open_job(self, job: dict) -> int:
+        """A job that was just queued (#89): a row with result "queued", finished by update_job."""
+        return self.record_job({**job, "result": "queued"})
+
+    def update_job(self, job_id: int, fields: dict) -> None:
+        """Set fields (JOB_FIELDS, and "ack": the ack comment's id) of an opened job."""
         with self._lock:
-            return [dict(j) for j in reversed(self._jobs[-max(0, limit):])] if limit > 0 else []
+            for row in self._jobs:
+                if row["id"] == job_id:
+                    row.update({k: v for k, v in fields.items() if k in JOB_FIELDS[1:] or k == "ack"})
+
+    def unfinished_jobs(self) -> list[dict]:
+        """Opened jobs that never finished (the service stopped): id, action, pr, sha, inventory,
+        result and ack, oldest first."""
+        with self._lock:
+            return [{k: j.get(k) for k in ("id", "action", "pr", "sha", "inventory", "result", "ack")}
+                    for j in self._jobs if j.get("result") in UNFINISHED]
+
+    def jobs(self, limit: int = 50) -> list[dict]:
+        """The newest finished jobs first."""
+        with self._lock:
+            done = [{f: j.get(f) for f in JOB_FIELDS} for j in self._jobs if j.get("result") not in UNFINISHED]
+            return list(reversed(done[-max(0, limit):])) if limit > 0 else []
 
 
 class SQLiteState(MemoryState):
@@ -121,6 +143,8 @@ class SQLiteState(MemoryState):
             for col in JOB_FIELDS[9:]:
                 if col not in existing:
                     db.execute(f'ALTER TABLE jobs ADD COLUMN "{col}" TEXT')
+            if "ack" not in existing:
+                db.execute('ALTER TABLE jobs ADD COLUMN "ack" INTEGER')
 
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None: we issue BEGIN IMMEDIATE ourselves. timeout waits out another writer.
@@ -190,11 +214,29 @@ class SQLiteState(MemoryState):
             db.execute("DELETE FROM jobs WHERE id <= ?", (cur.lastrowid - self.job_history,))
             return cur.lastrowid
 
+    def update_job(self, job_id, fields):
+        cols = [c for c in fields if c in JOB_FIELDS[1:] or c == "ack"]
+        if not cols:
+            return
+        values = [json.dumps(fields[c]) if c == "counts" and fields[c] is not None else fields[c] for c in cols]
+        with closing(self._connect()) as db:
+            db.execute(f"UPDATE jobs SET {', '.join(chr(34) + c + chr(34) + ' = ?' for c in cols)} WHERE id = ?",
+                       [*values, job_id])
+
+    def unfinished_jobs(self):
+        keys = ("id", "action", "pr", "sha", "inventory", "result", "ack")
+        with closing(self._connect()) as db:
+            rows = db.execute(f"SELECT {', '.join(chr(34) + c + chr(34) for c in keys)} FROM jobs"
+                              " WHERE result IN (?, ?) ORDER BY id", UNFINISHED).fetchall()
+        return [dict(zip(keys, r)) for r in rows]
+
     def jobs(self, limit=50):
         if limit <= 0:
             return []
         with closing(self._connect()) as db:
-            rows = db.execute(f"SELECT {', '.join(chr(34) + c + chr(34) for c in JOB_FIELDS)} FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = db.execute(f"SELECT {', '.join(chr(34) + c + chr(34) for c in JOB_FIELDS)} FROM jobs"
+                              " WHERE result IS NULL OR result NOT IN (?, ?) ORDER BY id DESC LIMIT ?",
+                              (*UNFINISHED, limit)).fetchall()
         jobs = [dict(zip(JOB_FIELDS, r)) for r in rows]
         for job in jobs:
             if job.get('counts') is not None:

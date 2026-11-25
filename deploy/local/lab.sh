@@ -127,6 +127,17 @@ case "${1:-help}" in
             expect status-apply-not-deadlocked "applied" "$(last_comment | head -3 | tr '\n' ' ')"
             expect status-apply "^success$" "$(st 'ferry/apply: lab')"
             curl -s -X POST localhost:18999/_rules -d '{"rules":[{"type":"pull_request","ruleset_id":1,"parameters":{"required_approving_review_count":1}}]}' >/dev/null ;;
+  ack)      # #89: the comment is acked at once (and gets 👀), and that ack becomes the result
+            n=$(curl -s localhost:18999/_state | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["comments"]))')
+            comment james "/ferry plan" > "$LAB/ack-reply"  # not in a subshell: wait_idle needs BEFORE_JOB
+            expect ack-queued "^plan queued$" "$(cat "$LAB/ack-reply")"
+            expect ack-posted "(queued|running) \(job [0-9]+\)" "$(last_comment)"  # an idle worker starts at once
+            wait_idle >/dev/null
+            m=$(curl -s localhost:18999/_state | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["comments"]))')
+            expect ack-one-comment "^1$" "$((m - n))"
+            expect ack-edited "^### ferry plan: .lab." "$(last_comment)"
+            expect ack-marker "<!-- ferry:plan " "$(last_comment | tail -1)"
+            expect ack-reaction "eyes" "$(curl -s localhost:18999/_state | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reactions", [])[-1:])')" ;;
   security) # every security scenario, in an order that leaves the PR usable
             for s in closed-plan base-branch diverged replay-comment pusher-approval commit-status; do "$0" "$s"; done ;;
   comments) curl -s localhost:18999/_state | python3 -c "$(printf '%s\n' 'import json, sys' \

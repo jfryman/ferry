@@ -89,6 +89,21 @@ def test_changed_files_paginates_and_includes_renames(gl):
     assert len(files) == 102 and "roles/a/x.yml" in files and "roles/b/x.yml" in files
 
 
+def test_notes_can_be_edited_and_awarded(gl):
+    """#89: the ack is edited in place; the triggering note gets the eyes award emoji."""
+    fake, _, be = gl
+    p = "/projects/infra%2Fansible/merge_requests/7/notes"
+    fake.routes[("PUT", f"{p}/3")] = lambda u, d: (200, {"id": 3, "author": {"username": "b"}, "body": d["body"]})
+    fake.routes[("POST", f"{p}/9/award_emoji")] = lambda u, d: (201, {"name": d["name"]})
+    assert be.edit_note(7, 3, "result").body == "result"
+    be.react(7, 9)
+    assert fake.calls[-2] == ("PUT", f"{API}{p}/3", {"body": "result"})
+    assert fake.calls[-1] == ("POST", f"{API}{p}/9/award_emoji", {"name": "eyes"})
+    with pytest.raises(Exception) as e:
+        be.edit_note(7, 4, "gone")
+    assert e.value.status == 404
+
+
 def test_notes_skip_system_notes(gl):
     fake, client, be = gl
     fake.routes[("GET", "/projects/infra%2Fansible/merge_requests/7/notes")] = [

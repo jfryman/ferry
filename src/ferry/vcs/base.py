@@ -79,6 +79,15 @@ class VCSBackend(Protocol):
 
     def post_note(self, cr_id: int, body: str) -> Note: ...
 
+    def edit_note(self, cr_id: int, note_id: int, body: str) -> Note:
+        """Replace the body of a note ferry posted (#89). Raises if the code host refuses or the note
+        is gone; callers fall back to post_note."""
+        ...
+
+    def react(self, cr_id: int, note_id: int, emoji: str = "eyes") -> None:
+        """Best effort: mark someone's comment as seen (#89). Callers ignore failures."""
+        ...
+
     def bot_username(self) -> str: ...
 
     def can_apply(self, username: str) -> bool:

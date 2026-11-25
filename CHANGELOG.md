@@ -5,12 +5,30 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 ## [Unreleased]
 
 ### Added
+- **ferry answers at once, in one comment per job** (#89): when `ferry serve` queues a plan, an
+  apply or a `/ferry unlock`, it posts `⏳ ferry plan: <inventory> @ <commit> queued (job N)` within
+  a second or two, edits it to `running` when the job starts, and then replaces it with the result
+  or the refusal. A busy change no longer collects a comment per step. The comment that asked gets
+  an 👀 reaction (GitHub) or award emoji (GitLab). If the ack can't be edited, the result is a new
+  comment, as before. See [docs/serve.md](docs/serve.md#progress-on-the-change). No new
+  permission: ferry edits its own comments with the access it already uses to post them.
+- **`queued` and `running` commit statuses** (#89): with `FERRY_COMMIT_STATUS=1`,
+  `ferry/plan: <inventory>` and `ferry/apply: <inventory>` go to pending `queued` and then
+  `running` at the same moments as the ack. A plan or apply that stops before an inventory now
+  resolves that inventory's status (`not run`, or `not applied`) instead of leaving it as it was.
+- **Jobs a restart left behind are reported** (#89): at startup, the service edits the ack of every
+  job the last run left queued or running to say it didn't finish, and records it as `error` in
+  `GET /jobs`. Re-run the command. `/jobs` still lists finished jobs only.
 - **Homebrew install for the CLI** (#86): `brew install jfryman/tap/ferry` on macOS or Linux,
   from [jfryman/homebrew-tap](https://github.com/jfryman/homebrew-tap). The formula installs the
   `ferry` CLI for `ferry run`. It doesn't install Ansible or the `service` extra, so install the
   `ansible-core` version your repository pins yourself. The tap follows new releases
   automatically. Without Homebrew, `pipx install 'git+https://github.com/jfryman/ferry@vX.Y.Z'`
   works too; see [docs/run.md](docs/run.md#install). Nothing changes for existing installs.
+
+### Changed
+- **Commit status descriptions** (#89): the pending description while a job runs is `running`,
+  not `planning` or `applying`. If something matches on the old text, update it.
 
 ## [0.4.2] - 2026-11-24
 

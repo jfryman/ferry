@@ -233,6 +233,24 @@ def refusal_comment(action: str, inventory: str, sha: str, reasons: list[str], r
     return f"### ferry {action}: `{inventory}` @ `{sha[:8]}` refused\n\n{items}"
 
 
+_ACK_STATE = {"queued": "⏳", "running": "⚙️", "done": "☑️", "skipped": "⏭️", "stopped": "⚠️"}
+_NAME_RE = re.compile(r"\A[A-Za-z0-9_.-]{1,100}\Z")
+
+
+def ack_comment(action: str, inventory: str | None, sha: str, state: str, job_id: int | None,
+                note: str = "") -> str:
+    """The comment ferry posts as soon as it queues a job and edits as the job goes (#89). It carries no
+    marker: the result that replaces it does. `inventory` is a command-parsed name or None (all of
+    them); `note` is ferry's own text."""
+    what = f"**ferry {action}**"
+    if inventory and _NAME_RE.match(inventory):
+        what += f": `{inventory}`"
+    if sha and re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+        what += f" @ `{sha[:8]}`"
+    job = f" (job {int(job_id)})" if job_id else ""
+    return f"{_ACK_STATE.get(state, '')} {what} {state}{job}" + (f"\n\n{note}" if note else "")
+
+
 HELP = """### ferry commands
 
 - `/ferry plan [inventory] [--sha COMMIT]`: check-mode run of this change (needs write access).

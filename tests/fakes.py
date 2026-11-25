@@ -69,6 +69,16 @@ class FakeVCS:
         self.notes[cr_id].append(n)
         return n
 
+    def edit_note(self, cr_id, note_id, body):
+        for i, n in enumerate(self.notes[cr_id]):
+            if n.id == note_id:
+                self.notes[cr_id][i] = Note(n.id, n.author, body, n.created_at)
+                return self.notes[cr_id][i]
+        raise NotFound(f"no note {note_id}")
+
+    def react(self, cr_id, note_id, emoji="eyes"):
+        self.reactions = getattr(self, "reactions", []) + [(cr_id, note_id, emoji)]
+
     def bot_username(self):
         return self.bot
 
