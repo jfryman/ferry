@@ -328,6 +328,10 @@ The service has one listener. All paths are on the same port.
 text, but they are internal. Never route them publicly. Scrape them from inside the private
 network.
 
+`/jobs` is a summary, not an audit trail. [RFC 0001](rfcs/0001-audit-trail.md) proposes an
+authenticated audit API under `/api/v1` that would replace it, with this
+[OpenAPI contract](api/audit.openapi.yaml). Neither is implemented yet.
+
 At the public edge, allow only:
 
 - `POST /webhook`, restricted to the code host's source addresses where you can, and
