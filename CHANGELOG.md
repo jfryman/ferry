@@ -4,6 +4,15 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-25
+
+ferry now answers on the change as soon as it queues a job, and keeps it to one comment per job: the
+ack it posts at once is edited to `running` and then replaced with the result. The hidden plan
+record is still the last line of a comment by ferry's own account, and the apply gates read it the
+same way. **Upgrading:** nothing to change. `ferry.yaml` parsing didn't change, so plans made by
+0.4.x stay valid. Jobs queued when the old version stops are lost as before, and the new version
+doesn't know about them; re-comment those.
+
 ### Added
 - **ferry answers at once, in one comment per job** (#89): when `ferry serve` queues a plan, an
   apply or a `/ferry unlock`, it posts `⏳ ferry plan: <inventory> @ <commit> queued (job N)` within
@@ -257,7 +266,8 @@ GitLab project that holds its own credentials. The GitLab CI driver is unchanged
 ### Added
 - The plan/apply/drift engine, the GitLab backend, tag locks, the CLI driver for GitLab CI, and drift metrics as node_exporter textfiles.
 
-[Unreleased]: https://github.com/jfryman/ferry/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/jfryman/ferry/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jfryman/ferry/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/jfryman/ferry/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jfryman/ferry/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jfryman/ferry/compare/v0.3.0...v0.4.0
