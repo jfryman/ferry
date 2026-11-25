@@ -217,4 +217,9 @@ When ferry cannot determine something, it refuses. This is a rule, and changes m
 - **The unauthenticated endpoints rely on network placement.** Keep `/healthz`, `/metrics` and
   `/jobs` off public routes.
 - **One instance.** The lock store is a single SQLite file. Losing it frees every lock.
+- **No tamper-evident audit trail yet.** `/jobs` keeps the newest `FERRY_JOB_HISTORY` jobs, without
+  refusal reasons. Plan details are in the change's comments, the commit statuses and the service
+  log. Nothing links an apply to the plan it consumed except the commit. [RFC 0001](rfcs/0001-audit-trail.md)
+  proposes a hash-chained audit log and an authenticated API to query it
+  ([contract](api/audit.openapi.yaml)). It is a proposal, not implemented.
 - **Redaction is pattern-based.** It cannot recognise a transformed secret. Use `no_log`.

@@ -11,6 +11,13 @@ All notable changes to ferry. Versions follow [semver](https://semver.org); tags
   `ansible-core` version your repository pins yourself. The tap follows new releases
   automatically. Without Homebrew, `pipx install 'git+https://github.com/jfryman/ferry@vX.Y.Z'`
   works too; see [docs/run.md](docs/run.md#install). Nothing changes for existing installs.
+- **A proposed design for an audit trail, and its API contract** (#88), for review:
+  [docs/rfcs/0001-audit-trail.md](docs/rfcs/0001-audit-trail.md) and
+  [docs/api/audit.openapi.yaml](docs/api/audit.openapi.yaml). It covers a hash-chained event
+  log kept apart from the lock store, applies linked to exactly one plan, a plan-versus-apply
+  verdict, change-request references, and an authenticated `/api/v1` read API with
+  `ferry audit show|export|verify`. Documentation only: nothing changes in ferry, and there is
+  nothing to do.
 
 ## [0.4.2] - 2026-11-24
 

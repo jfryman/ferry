@@ -1,0 +1,2532 @@
+openapi: 3.1.0
+info:
+  title: ferry audit API
+  version: 1.0.0-draft
+  summary: Read-only access to ferry's audit trail (proposed, not implemented).
+  description: |
+    **Status: proposed.** This is the contract from
+    [RFC 0001](../rfcs/0001-audit-trail.md). No part of it is implemented yet.
+
+    The API serves ferry's append-only, hash-chained audit log, and views computed from it:
+    changes (PRs and MRs), plans, applies, operator runs, inventory history, diff artifacts and
+    checkpoints.
+
+    **Authentication** uses the `ferry run` identity: a bearer JWT from `FERRY_RUN_OIDC_ISSUER`
+    for `FERRY_RUN_OIDC_AUDIENCE`, checked by the same verifier. **Authorization** is a separate
+    read role, set with `FERRY_AUDIT_READ_SUBJECTS` and `FERRY_AUDIT_READ_GROUPS`. Being allowed to
+    run doesn't grant read, and being allowed to read doesn't grant runs. The API answers 404 to
+    every path unless it is configured.
+
+    **Errors** have the same shape as the run API's, `{"error": "..."}`, plus a fixed `code`.
+    Error text is short and never echoes upstream bodies.
+
+    **Pagination** uses an opaque `cursor`. `next_cursor` is `null` on the last page. Cursors
+    encode a position in the chain, so they stay valid while new events are appended.
+
+    **Times** are RFC 3339 in UTC with milliseconds. **SHAs** are full 40-character hex.
+    **Hashes** are `sha256:` followed by 64 hex characters.
+
+    The service never verifies its own log. Clients verify with `ferry audit verify`, from
+    `GET /events` and `GET /audit/checkpoint`, against a public key they have pinned.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /api/v1
+    description: |
+      Relative to the ferry service, for example `https://ferry.example.com/api/v1`. Keep it on an
+      internal network.
+security:
+  - identityToken: []
+tags:
+  - name: changes
+    description: The history of one PR or MR
+  - name: plans
+    description: Plans and what they pinned
+  - name: applies
+    description: Applies, the plan each consumed, and the plan-versus-apply verdict
+  - name: runs
+    description: Operator runs (`ferry run`)
+  - name: events
+    description: The raw event log
+  - name: inventories
+    description: Per-inventory history
+  - name: artifacts
+    description: Content-addressed diff and config artifacts
+  - name: audit
+    description: Checkpoints and keys, for verification
+
+paths:
+  /changes/{number}:
+    get:
+      operationId: getChange
+      tags: [changes]
+      summary: The full history of one PR or MR
+      description: |
+        Every plan, apply, approval observation, lock event and verdict for the change, with its
+        `change_ref`. `number` is the PR or MR number on the service's repository.
+      parameters:
+        - $ref: '#/components/parameters/ChangeNumber'
+      responses:
+        '200':
+          description: The change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Change'
+              examples:
+                applied:
+                  $ref: '#/components/examples/ChangeApplied'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /plans/{plan_id}:
+    get:
+      operationId: getPlan
+      tags: [plans]
+      summary: One plan
+      description: |
+        What the plan pinned (head and base SHA, config digest, scope, policy result,
+        `change_ref`), its per-host results with diff hashes and artifact links, its status, and
+        every apply that consumed it.
+      parameters:
+        - $ref: '#/components/parameters/PlanId'
+      responses:
+        '200':
+          description: The plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+              examples:
+                completed:
+                  $ref: '#/components/examples/PlanCompleted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /applies/{apply_id}:
+    get:
+      operationId: getApply
+      tags: [applies]
+      summary: One apply
+      description: |
+        The plan it consumed, the approvals that counted, the gate result, per-host results with
+        diff hashes and artifact links, and the `plan_matches_apply` verdict.
+      parameters:
+        - $ref: '#/components/parameters/ApplyId'
+      responses:
+        '200':
+          description: The apply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Apply'
+              examples:
+                diverged:
+                  $ref: '#/components/examples/ApplyDiverged'
+                refused:
+                  $ref: '#/components/examples/ApplyRefused'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /runs/{run_id}:
+    get:
+      operationId: getRun
+      tags: [runs]
+      summary: One operator run
+      description: |
+        The identity (including a delegating agent, if the token had an `act` claim), intent,
+        certificate serial and expiry, lease and finish. Results reported by the client are
+        marked `asserted_by_client`.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: The run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+              examples:
+                agent:
+                  $ref: '#/components/examples/RunByAgent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /events:
+    get:
+      operationId: listEvents
+      tags: [events]
+      summary: Events, filtered, with cursor pagination
+      description: |
+        Raw events. With `order=seq` and no filter other than `after_seq`, the pages form a
+        contiguous segment of the chain that `ferry audit verify` can check. With other filters
+        the result is a report: it has gaps in `seq`, and doesn't verify on its own.
+
+        Filters combine with AND. `type` may be repeated, and those values combine with OR.
+      parameters:
+        - name: since
+          in: query
+          description: Events at or after this time (inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          description: Events before this time (exclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: after_seq
+          in: query
+          description: Events with a `seq` greater than this
+          schema:
+            type: integer
+            minimum: 0
+        - name: inventory
+          in: query
+          schema:
+            $ref: '#/components/schemas/InventoryName'
+        - name: change
+          in: query
+          description: A PR or MR number
+          schema:
+            type: integer
+            minimum: 1
+        - name: change_ref
+          in: query
+          description: An exact `change_ref` value
+          schema:
+            $ref: '#/components/schemas/ChangeRefValue'
+        - name: type
+          in: query
+          description: One or more event types
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 32
+            items:
+              $ref: '#/components/schemas/EventType'
+        - name: actor
+          in: query
+          description: An actor id (`act_…`)
+          schema:
+            $ref: '#/components/schemas/ActorId'
+        - name: plan_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/PlanId'
+        - name: apply_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApplyId'
+        - name: run_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/RunId'
+        - name: order
+          in: query
+          description: '`seq` is oldest first, `-seq` newest first'
+          schema:
+            type: string
+            enum: [seq, -seq]
+            default: -seq
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+              examples:
+                approvals:
+                  $ref: '#/components/examples/EventPageApprovals'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /inventories/{name}/history:
+    get:
+      operationId: getInventoryHistory
+      tags: [inventories]
+      summary: One inventory's history, newest first
+      description: Plans, applies, drift runs, operator runs and lock changes for one inventory.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/InventoryName'
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: kind
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [plan, apply, drift, run, lock]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of history entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryHistoryPage'
+              examples:
+                prod:
+                  $ref: '#/components/examples/InventoryHistory'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /artifacts/{sha256}:
+    get:
+      operationId: getArtifact
+      tags: [artifacts]
+      summary: One content-addressed artifact
+      description: |
+        A per-host redacted result (`ferry.audit.host-result/v1`) or a `ferry.yaml` text
+        (`ferry.audit.config/v1`). The SHA-256 of the response body equals `sha256`.
+        Answers 410 if retention removed it. Its hash stays in the chain.
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The artifact, byte for byte as stored
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/HostResultArtifact'
+                  - $ref: '#/components/schemas/ConfigArtifact'
+              examples:
+                host:
+                  $ref: '#/components/examples/HostArtifact'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /audit/checkpoint:
+    get:
+      operationId: getCheckpoint
+      tags: [audit]
+      summary: The latest checkpoint, or the one at a given seq
+      description: |
+        A checkpoint fixes the chain head (`seq`, `hash`) at a point in time. With a signing key
+        configured it is signed with Ed25519 over its canonical JSON without `signature`.
+
+        Verify flow: fetch a checkpoint and store it outside ferry. Later, page through
+        `GET /events?order=seq` up to its `seq`, recompute the chain, and compare the hash at that
+        `seq`. Check the signature against a public key you pinned. `GET /audit/keys` is a
+        convenience, not a root of trust.
+      parameters:
+        - name: seq
+          in: query
+          description: The checkpoint that covers exactly this `seq`. Omit for the latest.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: A checkpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Checkpoint'
+              examples:
+                signed:
+                  $ref: '#/components/examples/CheckpointSigned'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /audit/keys:
+    get:
+      operationId: listCheckpointKeys
+      tags: [audit]
+      summary: Checkpoint public keys, current and retired
+      responses:
+        '200':
+          description: The keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyList'
+              examples:
+                one:
+                  value:
+                    keys:
+                      - key_id: 'ed25519:3a7f9c0e'
+                        alg: Ed25519
+                        public_key: MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
+                        first_used: '2026-11-25T00:00:00.000Z'
+                        last_used: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+components:
+  securitySchemes:
+    identityToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An RS256 identity JWT from `FERRY_RUN_OIDC_ISSUER` with audience `FERRY_RUN_OIDC_AUDIENCE`,
+        whose `sub` is in `FERRY_AUDIT_READ_SUBJECTS` or one of whose `groups` is in
+        `FERRY_AUDIT_READ_GROUPS`.
+
+  parameters:
+    ChangeNumber:
+      name: number
+      in: path
+      required: true
+      description: The PR or MR number
+      schema:
+        type: integer
+        minimum: 1
+    PlanId:
+      name: plan_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/PlanId'
+    ApplyId:
+      name: apply_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ApplyId'
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/RunId'
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      description: '`next_cursor` from the previous page, with the same filters'
+      schema:
+        type: string
+        maxLength: 512
+
+  responses:
+    BadRequest:
+      description: A malformed id, filter or cursor
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: invalid cursor
+            code: bad_request
+    Unauthorized:
+      description: No identity token, or an invalid one
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: invalid identity token
+            code: unauthenticated
+    Forbidden:
+      description: The identity has no read role
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: subject not allowed to read the audit
+            code: forbidden
+    NotFound:
+      description: No such record, or the API isn't configured
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not found
+            code: not_found
+    Gone:
+      description: The record existed and was removed by retention or redaction. Its hash stays in the chain.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: artifact removed by retention
+            code: gone
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          description: Seconds to wait
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: too many requests
+            code: rate_limited
+    Unavailable:
+      description: The audit store or the identity issuer can't be reached. ferry fails closed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: audit unavailable
+            code: unavailable
+
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          maxLength: 200
+          description: Short, fixed text. Never echoes upstream bodies.
+        code:
+          type: string
+          enum: [bad_request, unauthenticated, forbidden, not_found, gone, rate_limited, unavailable]
+
+    # ---- ids and scalars ---------------------------------------------------------------------
+    PlanId:
+      type: string
+      pattern: '^pln_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [pln_01JDX7ZK3A9B8C7D6E5F4G3H2J]
+    ApplyId:
+      type: string
+      pattern: '^apl_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W]
+    EventId:
+      type: string
+      pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+    ActorId:
+      type: string
+      pattern: '^act_[0-9A-HJKMNP-TV-Z]{26}$'
+    ChainId:
+      type: string
+      pattern: '^chn_[0-9A-HJKMNP-TV-Z]{26}$'
+    CheckpointId:
+      type: string
+      pattern: '^ckp_[0-9A-HJKMNP-TV-Z]{26}$'
+    RunId:
+      type: string
+      pattern: '^[0-9a-f]{32}$'
+      description: The existing `ferry run` id
+    Sha:
+      type: string
+      pattern: '^[0-9a-f]{40}$'
+    Hash:
+      type: string
+      pattern: '^sha256:[0-9a-f]{64}$'
+    ConfigDigest:
+      type: object
+      required: [sha256, short]
+      additionalProperties: false
+      properties:
+        sha256:
+          $ref: '#/components/schemas/Hash'
+        short:
+          type: string
+          pattern: '^[0-9a-f]{16}$'
+          description: The 16-character prefix carried by the plan record (today's `config` field)
+        artifact:
+          $ref: '#/components/schemas/ArtifactRef'
+    InventoryName:
+      type: string
+      minLength: 1
+      maxLength: 128
+    ChangeRefValue:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: No control characters. A URL must be https.
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339, UTC, milliseconds
+    DurationMs:
+      type: integer
+      minimum: 0
+
+    # ---- shared objects ----------------------------------------------------------------------
+    ChangeKey:
+      type: object
+      required: [backend, repository, number]
+      additionalProperties: false
+      properties:
+        backend:
+          type: string
+          enum: [github, gitlab]
+        repository:
+          type: string
+          description: OWNER/NAME on GitHub, the project path on GitLab
+        number:
+          type: integer
+          minimum: 1
+        url:
+          type: string
+          format: uri
+
+    ChangeRef:
+      type: object
+      required: [value, source]
+      additionalProperties: false
+      properties:
+        value:
+          $ref: '#/components/schemas/ChangeRefValue'
+        source:
+          type: string
+          enum: [description_trailer, cli_flag]
+        verified:
+          type: boolean
+          const: false
+          description: ferry checks the format only. The value is the change author's claim.
+        matches_plan:
+          type: [boolean, 'null']
+          description: On an apply, whether the plan pinned the same value. `null` when there is no plan.
+
+    Actor:
+      type: object
+      required: [id, kind, via]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/ActorId'
+        kind:
+          type: string
+          enum: [human, agent, service, unknown]
+        via:
+          type: string
+          enum: [comment, review, push, webhook, cli, schedule, service]
+        login:
+          type: [string, 'null']
+          description: The code host login, for code host actors
+        issuer:
+          type: [string, 'null']
+          format: uri
+          description: The identity issuer, for token-authenticated actors
+        subject:
+          type: [string, 'null']
+          description: The token's `sub`, or the `act.sub` of a delegating agent
+        display_name:
+          type: [string, 'null']
+        redacted:
+          type: boolean
+          description: The identity was erased. Only `id`, `kind` and `via` remain.
+        on_behalf_of:
+          $ref: '#/components/schemas/Actor'
+        claimed_requester:
+          type: [string, 'null']
+          description: A `Requested-By` trailer on an agent's PR. The agent's own claim, never verified.
+        agent_run:
+          type: [string, 'null']
+          format: uri
+          description: An `Agent-Run` trailer on an agent's PR. The agent's own claim, never verified.
+
+    Text:
+      type: object
+      description: |
+        Free text held outside the chain. The event holds `commitment`, which is
+        SHA-256(salt ‖ UTF-8(text)). After erasure `text` is null and `redacted` is true.
+      required: [commitment, redacted]
+      additionalProperties: false
+      properties:
+        commitment:
+          $ref: '#/components/schemas/Hash'
+        redacted:
+          type: boolean
+        text:
+          type: [string, 'null']
+          maxLength: 1024
+        salt:
+          type: [string, 'null']
+          description: Base64, 16 bytes. Returned so clients can check the commitment.
+
+    ArtifactRef:
+      type: object
+      required: [sha256, bytes, stored]
+      additionalProperties: false
+      properties:
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        bytes:
+          type: integer
+          minimum: 0
+        stored:
+          type: boolean
+          description: False if storing diffs is off, or retention removed it
+        truncated:
+          type: boolean
+        url:
+          type: string
+          description: Relative to the API base, for example `/artifacts/a91f…`
+
+    Scope:
+      type: object
+      required: [limit, everything, noop]
+      additionalProperties: false
+      properties:
+        limit:
+          type: [string, 'null']
+          description: The `--limit` used, or null for every host
+        everything:
+          type: boolean
+        noop:
+          type: boolean
+        reasons:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            required: [file, why]
+            additionalProperties: false
+            properties:
+              file:
+                type: string
+              why:
+                type: string
+
+    PolicyResult:
+      type: object
+      required: [passed]
+      additionalProperties: false
+      properties:
+        passed:
+          type: boolean
+        violations:
+          type: array
+          items:
+            type: string
+
+    Totals:
+      type: object
+      additionalProperties: false
+      properties:
+        hosts:
+          type: integer
+          minimum: 0
+        ok:
+          type: integer
+          minimum: 0
+        changed:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        unreachable:
+          type: integer
+          minimum: 0
+        blocked:
+          type: integer
+          minimum: 0
+
+    TaskChange:
+      type: object
+      required: [key, status, diff_hash]
+      additionalProperties: false
+      properties:
+        key:
+          type: string
+          description: '`role/task name#occurrence` on this host. Ansible has no stable task id.'
+        status:
+          type: string
+          enum: [changed, failed, unreachable, blocked, skipped_in_check_mode]
+        diff_hash:
+          $ref: '#/components/schemas/Hash'
+        no_log:
+          type: boolean
+
+    HostResult:
+      type: object
+      required: [host, state, changed_tasks, failed_tasks, diff_hash]
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+        state:
+          type: string
+          enum: [ok, changed, failed, unreachable, blocked]
+        ok_tasks:
+          type: integer
+          minimum: 0
+        changed_tasks:
+          type: integer
+          minimum: 0
+        failed_tasks:
+          type: integer
+          minimum: 0
+        skipped_tasks:
+          type: integer
+          minimum: 0
+        unreachable:
+          type: boolean
+        blocked_reason:
+          type: [string, 'null']
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskChange'
+        diff_hash:
+          $ref: '#/components/schemas/Hash'
+        artifact:
+          $ref: '#/components/schemas/ArtifactRef'
+
+    Divergence:
+      type: object
+      required: [host, kind]
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+        kind:
+          type: string
+          enum: [host_unplanned, host_not_applied, task_unplanned, task_not_applied, diff_mismatch,
+                 check_mode_skipped, host_failed]
+        task:
+          type: [string, 'null']
+        planned_hash:
+          oneOf:
+            - $ref: '#/components/schemas/Hash'
+            - type: 'null'
+        applied_hash:
+          oneOf:
+            - $ref: '#/components/schemas/Hash'
+            - type: 'null'
+
+    Verdict:
+      type: object
+      description: '`plan_matches_apply`. Evidence for a reviewer, not a gate.'
+      required: [algorithm, result, divergences]
+      additionalProperties: false
+      properties:
+        algorithm:
+          type: string
+          const: ferry.verdict/v1
+        result:
+          type: string
+          enum: [match, diverged, incomplete, unverifiable]
+        unverifiable_because:
+          type: [string, 'null']
+          enum: [plan_predates_audit, plan_pruned, operator_run, no_plan, null]
+        divergences:
+          type: array
+          items:
+            $ref: '#/components/schemas/Divergence'
+
+    Approval:
+      type: object
+      required: [event_id, approver, head_sha, head_source, counted, reason, observed_at]
+      additionalProperties: false
+      properties:
+        event_id:
+          $ref: '#/components/schemas/EventId'
+        approver:
+          $ref: '#/components/schemas/Actor'
+        approved_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        head_sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+          description: The head the approval is for, or null if ferry couldn't tell
+        head_source:
+          type: string
+          enum: [review_commit, approved_at_after_head, reset_on_push, unknown]
+        counted:
+          type: boolean
+        reason:
+          type: string
+          enum: [counted, not_head, author, contributor, no_write_access, bot, contributors_unknown,
+                 head_unknown]
+        observed_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    GateResult:
+      type: object
+      required: [passed, reasons]
+      additionalProperties: false
+      properties:
+        passed:
+          type: boolean
+        stage:
+          type: [string, 'null']
+          enum: [precheck, recheck, null]
+          description: Where a refusal happened. The precheck is before credentials, the recheck after.
+        reasons:
+          type: array
+          description: As posted on the change, after the redactor
+          items:
+            type: string
+            maxLength: 2000
+
+    PlanSummary:
+      type: object
+      required: [plan_id, status, inventory, head_sha, requested_at]
+      additionalProperties: false
+      properties:
+        plan_id:
+          $ref: '#/components/schemas/PlanId'
+        status:
+          $ref: '#/components/schemas/PlanStatus'
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        clean:
+          type: [boolean, 'null']
+        requested_at:
+          $ref: '#/components/schemas/Timestamp'
+        completed_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    ApplySummary:
+      type: object
+      required: [apply_id, plan_id, status, inventory, head_sha, requested_at]
+      additionalProperties: false
+      properties:
+        apply_id:
+          $ref: '#/components/schemas/ApplyId'
+        plan_id:
+          oneOf:
+            - $ref: '#/components/schemas/PlanId'
+            - type: 'null'
+        status:
+          $ref: '#/components/schemas/ApplyStatus'
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        verdict:
+          type: [string, 'null']
+          enum: [match, diverged, incomplete, unverifiable, null]
+        requested_at:
+          $ref: '#/components/schemas/Timestamp'
+        completed_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    PlanStatus:
+      type: string
+      enum: [requested, refused, running, interrupted, completed]
+    ApplyStatus:
+      type: string
+      enum: [requested, refused, running, interrupted, completed]
+
+    LockEventSummary:
+      type: object
+      required: [event_id, type, inventory, at]
+      additionalProperties: false
+      properties:
+        event_id:
+          $ref: '#/components/schemas/EventId'
+        type:
+          type: string
+          enum: [lock.acquired, lock.released, lock.taken_over]
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        at:
+          $ref: '#/components/schemas/Timestamp'
+        reason:
+          type: [string, 'null']
+
+    # ---- resources ---------------------------------------------------------------------------
+    Change:
+      type: object
+      required: [change, state, plans, applies, approvals, locks, events_url]
+      additionalProperties: false
+      properties:
+        change:
+          $ref: '#/components/schemas/ChangeKey'
+        state:
+          type: string
+          enum: [open, merged, closed, unknown]
+          description: As last observed by ferry
+        change_ref:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeRef'
+            - type: 'null'
+        author:
+          $ref: '#/components/schemas/Actor'
+        plans:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanSummary'
+        applies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplySummary'
+        approvals:
+          type: array
+          description: The approvals from the most recent gate evaluation
+          items:
+            $ref: '#/components/schemas/Approval'
+        locks:
+          type: array
+          items:
+            $ref: '#/components/schemas/LockEventSummary'
+        events_url:
+          type: string
+          description: '`/events?change={number}&order=seq`'
+
+    Plan:
+      type: object
+      required: [plan_id, status, change, inventory, head_sha, requested_by, trigger, requested_at]
+      additionalProperties: false
+      properties:
+        plan_id:
+          $ref: '#/components/schemas/PlanId'
+        status:
+          $ref: '#/components/schemas/PlanStatus'
+        change:
+          $ref: '#/components/schemas/ChangeKey'
+        change_ref:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeRef'
+            - type: 'null'
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        base_sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        config_digest:
+          oneOf:
+            - $ref: '#/components/schemas/ConfigDigest'
+            - type: 'null'
+        scope:
+          oneOf:
+            - $ref: '#/components/schemas/Scope'
+            - type: 'null'
+        policy:
+          oneOf:
+            - $ref: '#/components/schemas/PolicyResult'
+            - type: 'null'
+        requested_by:
+          $ref: '#/components/schemas/Actor'
+        trigger:
+          type: string
+          enum: [autoplan, comment]
+        refusal:
+          oneOf:
+            - $ref: '#/components/schemas/GateResult'
+            - type: 'null'
+        clean:
+          type: [boolean, 'null']
+        rc:
+          type: [integer, 'null']
+        totals:
+          oneOf:
+            - $ref: '#/components/schemas/Totals'
+            - type: 'null'
+        hosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostResult'
+        record:
+          type: [object, 'null']
+          description: The plan record posted on the change
+          additionalProperties: false
+          properties:
+            comment_url:
+              type: string
+              format: uri
+            mac:
+              type: [string, 'null']
+              pattern: '^[0-9a-f]{64}$'
+        requested_at:
+          $ref: '#/components/schemas/Timestamp'
+        started_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        completed_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        duration_ms:
+          oneOf:
+            - $ref: '#/components/schemas/DurationMs'
+            - type: 'null'
+        consumed_by:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplyId'
+        event_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventId'
+
+    Apply:
+      type: object
+      required: [apply_id, plan_id, status, change, inventory, head_sha, requested_by, gates, requested_at]
+      additionalProperties: false
+      properties:
+        apply_id:
+          $ref: '#/components/schemas/ApplyId'
+        plan_id:
+          description: The one plan this apply consumed. Null if refused before a plan was found, or if the plan record predates the audit.
+          oneOf:
+            - $ref: '#/components/schemas/PlanId'
+            - type: 'null'
+        status:
+          $ref: '#/components/schemas/ApplyStatus'
+        change:
+          $ref: '#/components/schemas/ChangeKey'
+        change_ref:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeRef'
+            - type: 'null'
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        requested_by:
+          $ref: '#/components/schemas/Actor'
+        approvals:
+          type: array
+          description: Every approval observed at the last gate evaluation, counted or not
+          items:
+            $ref: '#/components/schemas/Approval'
+        gates:
+          $ref: '#/components/schemas/GateResult'
+        clean:
+          type: [boolean, 'null']
+        rc:
+          type: [integer, 'null']
+        totals:
+          oneOf:
+            - $ref: '#/components/schemas/Totals'
+            - type: 'null'
+        hosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostResult'
+        verdict:
+          oneOf:
+            - $ref: '#/components/schemas/Verdict'
+            - type: 'null'
+        requested_at:
+          $ref: '#/components/schemas/Timestamp'
+        started_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        completed_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        duration_ms:
+          oneOf:
+            - $ref: '#/components/schemas/DurationMs'
+            - type: 'null'
+        event_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventId'
+
+    Run:
+      type: object
+      required: [run_id, status, actor, inventory, mode, sha, issued_at]
+      additionalProperties: false
+      properties:
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        status:
+          type: string
+          enum: [refused, active, finished, expired]
+        actor:
+          $ref: '#/components/schemas/Actor'
+        inventory:
+          $ref: '#/components/schemas/InventoryName'
+        mode:
+          type: string
+          enum: [check, apply]
+        sha:
+          $ref: '#/components/schemas/Sha'
+        limit:
+          type: [string, 'null']
+        playbook:
+          type: string
+        change_ref:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeRef'
+            - type: 'null'
+        reason:
+          oneOf:
+            - $ref: '#/components/schemas/Text'
+            - type: 'null'
+        intent:
+          oneOf:
+            - $ref: '#/components/schemas/Text'
+            - type: 'null'
+        intent_ref:
+          type: [string, 'null']
+          format: uri
+        certificate_serial:
+          type: [string, 'null']
+        certificate_expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        issued_at:
+          $ref: '#/components/schemas/Timestamp'
+        finished_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        result:
+          type: [object, 'null']
+          additionalProperties: false
+          properties:
+            ok:
+              type: boolean
+            counts:
+              type: object
+              additionalProperties: false
+              properties:
+                hosts:
+                  type: integer
+                changed_tasks:
+                  type: integer
+                failed_tasks:
+                  type: integer
+            asserted_by_client:
+              type: boolean
+              const: true
+              description: The operator's machine ran Ansible. These numbers are its claim.
+        verdict:
+          $ref: '#/components/schemas/Verdict'
+        event_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventId'
+
+    InventoryHistoryEntry:
+      type: object
+      required: [kind, at, event_id]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [plan, apply, drift, run, lock]
+        at:
+          $ref: '#/components/schemas/Timestamp'
+        event_id:
+          $ref: '#/components/schemas/EventId'
+        plan_id:
+          oneOf:
+            - $ref: '#/components/schemas/PlanId'
+            - type: 'null'
+        apply_id:
+          oneOf:
+            - $ref: '#/components/schemas/ApplyId'
+            - type: 'null'
+        run_id:
+          oneOf:
+            - $ref: '#/components/schemas/RunId'
+            - type: 'null'
+        change:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeKey'
+            - type: 'null'
+        sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        result:
+          type: [string, 'null']
+          description: ok, failed, refused, changed (drift) and so on
+        actor:
+          $ref: '#/components/schemas/Actor'
+
+    InventoryHistoryPage:
+      type: object
+      required: [entries, next_cursor]
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/InventoryHistoryEntry'
+        next_cursor:
+          type: [string, 'null']
+
+    HostResultArtifact:
+      type: object
+      required: [schema, host, kind, tasks]
+      additionalProperties: false
+      properties:
+        schema:
+          type: string
+          const: ferry.audit.host-result/v1
+        host:
+          type: string
+        kind:
+          type: string
+          enum: [plan, apply, drift]
+        truncated:
+          type: boolean
+        tasks:
+          type: array
+          items:
+            type: object
+            required: [key, status]
+            additionalProperties: false
+            properties:
+              key:
+                type: string
+              task:
+                type: string
+              role:
+                type: [string, 'null']
+              status:
+                type: string
+                enum: [changed, failed, unreachable, blocked, skipped_in_check_mode]
+              no_log:
+                type: boolean
+              diffs:
+                type: array
+                description: Redacted unified diffs, as rendered on the change
+                items:
+                  type: string
+              msg:
+                type: [string, 'null']
+                description: Redacted
+
+    ConfigArtifact:
+      type: object
+      required: [schema, digest, parsed, text]
+      additionalProperties: false
+      properties:
+        schema:
+          type: string
+          const: ferry.audit.config/v1
+        digest:
+          $ref: '#/components/schemas/Hash'
+        parsed:
+          type: string
+          description: The exact JSON the digest is the SHA-256 of (the parsed config, keys sorted)
+        text:
+          type: string
+          description: '`ferry.yaml` from the default branch, as read'
+
+    Checkpoint:
+      type: object
+      required: [schema, checkpoint_id, chain_id, seq, hash, at, key_id, signature]
+      additionalProperties: false
+      properties:
+        schema:
+          type: string
+          const: ferry.audit.checkpoint/v1
+        checkpoint_id:
+          $ref: '#/components/schemas/CheckpointId'
+        chain_id:
+          $ref: '#/components/schemas/ChainId'
+        seq:
+          type: integer
+          minimum: 1
+        hash:
+          $ref: '#/components/schemas/Hash'
+        at:
+          $ref: '#/components/schemas/Timestamp'
+        previous_checkpoint_id:
+          oneOf:
+            - $ref: '#/components/schemas/CheckpointId'
+            - type: 'null'
+        key_id:
+          type: [string, 'null']
+          pattern: '^ed25519:[0-9a-f]{8}$'
+          description: Null when no signing key is configured
+        signature:
+          type: [string, 'null']
+          description: Base64 Ed25519 signature over the canonical JSON of this object without `signature`
+
+    KeyList:
+      type: object
+      required: [keys]
+      additionalProperties: false
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [key_id, alg, public_key]
+            additionalProperties: false
+            properties:
+              key_id:
+                type: string
+                pattern: '^ed25519:[0-9a-f]{8}$'
+              alg:
+                type: string
+                const: Ed25519
+              public_key:
+                type: string
+                description: Base64 DER SubjectPublicKeyInfo
+              first_used:
+                oneOf:
+                  - $ref: '#/components/schemas/Timestamp'
+                  - type: 'null'
+              last_used:
+                oneOf:
+                  - $ref: '#/components/schemas/Timestamp'
+                  - type: 'null'
+                description: Null for the current key
+
+    # ---- events ------------------------------------------------------------------------------
+    EventPage:
+      type: object
+      required: [events, next_cursor, head]
+      additionalProperties: false
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        next_cursor:
+          type: [string, 'null']
+        head:
+          type: object
+          description: The chain head when the page was read
+          required: [seq, hash]
+          additionalProperties: false
+          properties:
+            seq:
+              type: integer
+              minimum: 1
+            hash:
+              $ref: '#/components/schemas/Hash'
+
+    EventType:
+      type: string
+      enum:
+        - audit.genesis
+        - service.started
+        - switch.changed
+        - webhook.received
+        - webhook.rejected
+        - plan.requested
+        - plan.refused
+        - plan.started
+        - plan.completed
+        - approval.observed
+        - apply.requested
+        - apply.refused
+        - apply.started
+        - apply.completed
+        - lock.acquired
+        - lock.released
+        - lock.taken_over
+        - drift.completed
+        - run.refused
+        - run.issued
+        - run.finished
+        - run.expired
+        - audit.checkpoint
+        - audit.redacted
+        - audit.pruned
+
+    EventEnvelope:
+      description: |
+        The fields every event has. `Event` selects the `data` schema by `type`.
+
+        `hash` = `sha256:` + hex(SHA-256(canonical JSON of the event without `hash`)).
+        Canonical JSON: keys sorted, no insignificant whitespace, UTF-8, no floats. For ferry's
+        events this equals RFC 8785 (JCS).
+
+        In the API, an `actor` is shown with its identity unless erased. In the chain, and in
+        exports without identities, an actor has only `id`, `kind`, `via` and `on_behalf_of`.
+        The hash is computed over that form, and `Text` fields over `commitment` and `redacted`
+        only.
+      type: object
+      required: [schema, chain_id, seq, id, type, at, ferry_version, actor, data, prev_hash, hash]
+      properties:
+        schema:
+          type: string
+          const: ferry.audit/v1
+        chain_id:
+          $ref: '#/components/schemas/ChainId'
+        seq:
+          type: integer
+          minimum: 1
+        id:
+          $ref: '#/components/schemas/EventId'
+        type:
+          $ref: '#/components/schemas/EventType'
+        at:
+          $ref: '#/components/schemas/Timestamp'
+        ferry_version:
+          type: string
+        change:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeKey'
+            - type: 'null'
+        change_ref:
+          oneOf:
+            - $ref: '#/components/schemas/ChangeRefValue'
+            - type: 'null'
+        inventory:
+          oneOf:
+            - $ref: '#/components/schemas/InventoryName'
+            - type: 'null'
+        plan_id:
+          oneOf:
+            - $ref: '#/components/schemas/PlanId'
+            - type: 'null'
+        apply_id:
+          oneOf:
+            - $ref: '#/components/schemas/ApplyId'
+            - type: 'null'
+        run_id:
+          oneOf:
+            - $ref: '#/components/schemas/RunId'
+            - type: 'null'
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/Actor'
+            - type: 'null'
+        data:
+          type: object
+          description: The type-specific payload, selected by `type`
+        prev_hash:
+          $ref: '#/components/schemas/Hash'
+        hash:
+          $ref: '#/components/schemas/Hash'
+    Event:
+      description: One event, with `data` selected by `type`. See `EventEnvelope` for the hash rules.
+      oneOf:
+        - $ref: '#/components/schemas/EventPlanRequested'
+        - $ref: '#/components/schemas/EventPlanRefused'
+        - $ref: '#/components/schemas/EventPlanStarted'
+        - $ref: '#/components/schemas/EventPlanCompleted'
+        - $ref: '#/components/schemas/EventApprovalObserved'
+        - $ref: '#/components/schemas/EventApplyRequested'
+        - $ref: '#/components/schemas/EventApplyRefused'
+        - $ref: '#/components/schemas/EventApplyStarted'
+        - $ref: '#/components/schemas/EventApplyCompleted'
+        - $ref: '#/components/schemas/EventLock'
+        - $ref: '#/components/schemas/EventDriftCompleted'
+        - $ref: '#/components/schemas/EventRun'
+        - $ref: '#/components/schemas/EventWebhookReceived'
+        - $ref: '#/components/schemas/EventWebhookRejected'
+        - $ref: '#/components/schemas/EventAudit'
+      discriminator:
+        propertyName: type
+        mapping:
+          plan.requested: '#/components/schemas/EventPlanRequested'
+          plan.refused: '#/components/schemas/EventPlanRefused'
+          plan.started: '#/components/schemas/EventPlanStarted'
+          plan.completed: '#/components/schemas/EventPlanCompleted'
+          approval.observed: '#/components/schemas/EventApprovalObserved'
+          apply.requested: '#/components/schemas/EventApplyRequested'
+          apply.refused: '#/components/schemas/EventApplyRefused'
+          apply.started: '#/components/schemas/EventApplyStarted'
+          apply.completed: '#/components/schemas/EventApplyCompleted'
+          lock.acquired: '#/components/schemas/EventLock'
+          lock.released: '#/components/schemas/EventLock'
+          lock.taken_over: '#/components/schemas/EventLock'
+          drift.completed: '#/components/schemas/EventDriftCompleted'
+          run.refused: '#/components/schemas/EventRun'
+          run.issued: '#/components/schemas/EventRun'
+          run.finished: '#/components/schemas/EventRun'
+          run.expired: '#/components/schemas/EventRun'
+          webhook.received: '#/components/schemas/EventWebhookReceived'
+          webhook.rejected: '#/components/schemas/EventWebhookRejected'
+          audit.genesis: '#/components/schemas/EventAudit'
+          service.started: '#/components/schemas/EventAudit'
+          switch.changed: '#/components/schemas/EventAudit'
+          audit.checkpoint: '#/components/schemas/EventAudit'
+          audit.redacted: '#/components/schemas/EventAudit'
+          audit.pruned: '#/components/schemas/EventAudit'
+    EventPlanRequested:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: plan.requested
+            data:
+              $ref: '#/components/schemas/EventDataPlanRequested'
+    EventPlanRefused:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: plan.refused
+            data:
+              $ref: '#/components/schemas/EventDataRefused'
+    EventPlanStarted:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: plan.started
+            data:
+              $ref: '#/components/schemas/EventDataPlanStarted'
+    EventPlanCompleted:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: plan.completed
+            data:
+              $ref: '#/components/schemas/EventDataRunCompleted'
+    EventApprovalObserved:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: approval.observed
+            data:
+              $ref: '#/components/schemas/EventDataApprovalObserved'
+    EventApplyRequested:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: apply.requested
+            data:
+              $ref: '#/components/schemas/EventDataApplyRequested'
+    EventApplyRefused:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: apply.refused
+            data:
+              $ref: '#/components/schemas/EventDataRefused'
+    EventApplyStarted:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: apply.started
+            data:
+              $ref: '#/components/schemas/EventDataApplyStarted'
+    EventApplyCompleted:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: apply.completed
+            data:
+              $ref: '#/components/schemas/EventDataApplyCompleted'
+    EventLock:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              enum: [lock.acquired, lock.released, lock.taken_over]
+            data:
+              $ref: '#/components/schemas/EventDataLock'
+    EventDriftCompleted:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: drift.completed
+            data:
+              $ref: '#/components/schemas/EventDataDriftCompleted'
+    EventRun:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              enum: [run.refused, run.issued, run.finished, run.expired]
+            data:
+              $ref: '#/components/schemas/EventDataRun'
+    EventWebhookReceived:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: webhook.received
+            data:
+              $ref: '#/components/schemas/EventDataWebhookReceived'
+    EventWebhookRejected:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              const: webhook.rejected
+            data:
+              $ref: '#/components/schemas/EventDataWebhookRejected'
+    EventAudit:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type:
+              enum: [audit.genesis, service.started, switch.changed, audit.checkpoint, audit.redacted, audit.pruned]
+            data:
+              $ref: '#/components/schemas/EventDataAudit'
+
+    EventDataPlanRequested:
+      type: object
+      required: [head_sha, trigger]
+      properties:
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        trigger:
+          type: string
+          enum: [autoplan, comment]
+        comment_id:
+          type: [string, 'null']
+        delivery_id:
+          type: [string, 'null']
+
+    EventDataRefused:
+      type: object
+      required: [reasons]
+      properties:
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        stage:
+          type: [string, 'null']
+          enum: [precheck, recheck, null]
+        reasons:
+          type: array
+          items:
+            type: string
+
+    EventDataPlanStarted:
+      type: object
+      required: [head_sha, config_digest, scope, policy]
+      properties:
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        base_sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        config_digest:
+          $ref: '#/components/schemas/ConfigDigest'
+        scope:
+          $ref: '#/components/schemas/Scope'
+        policy:
+          $ref: '#/components/schemas/PolicyResult'
+        warnings:
+          type: array
+          items:
+            type: string
+
+    EventDataRunCompleted:
+      type: object
+      required: [clean, rc, totals, hosts]
+      properties:
+        clean:
+          type: boolean
+        rc:
+          type: integer
+        totals:
+          $ref: '#/components/schemas/Totals'
+        hosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostResult'
+        record_mac:
+          type: [string, 'null']
+        comment_url:
+          type: [string, 'null']
+          format: uri
+        duration_ms:
+          $ref: '#/components/schemas/DurationMs'
+
+    EventDataApprovalObserved:
+      type: object
+      required: [approver, head_sha, head_source, counted, reason]
+      properties:
+        approver:
+          $ref: '#/components/schemas/ActorId'
+        approved_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        head_sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        head_source:
+          type: string
+          enum: [review_commit, approved_at_after_head, reset_on_push, unknown]
+        counted:
+          type: boolean
+        reason:
+          type: string
+          enum: [counted, not_head, author, contributor, no_write_access, bot, contributors_unknown,
+                 head_unknown]
+
+    EventDataApplyRequested:
+      type: object
+      required: [head_sha]
+      properties:
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        comment_id:
+          type: [string, 'null']
+        delivery_id:
+          type: [string, 'null']
+
+    EventDataApplyStarted:
+      type: object
+      required: [head_sha, counted_approvals]
+      properties:
+        head_sha:
+          $ref: '#/components/schemas/Sha'
+        counted_approvals:
+          type: array
+          description: The `approval.observed` events that counted
+          items:
+            $ref: '#/components/schemas/EventId'
+        plan_record_mac:
+          type: [string, 'null']
+
+    EventDataApplyCompleted:
+      allOf:
+        - $ref: '#/components/schemas/EventDataRunCompleted'
+        - type: object
+          required: [verdict]
+          properties:
+            verdict:
+              $ref: '#/components/schemas/Verdict'
+
+    EventDataLock:
+      type: object
+      required: [holder_kind, holder]
+      properties:
+        holder_kind:
+          type: string
+          enum: [change, run, drift]
+        holder:
+          type: string
+          description: The change number, `run:<run_id>` or `drift`. Never an operator name or subject.
+        sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        reason:
+          type: [string, 'null']
+          enum: [merged, closed, unlock_command, run_finished, run_expired, drift_finished, null]
+        previous_holder:
+          type: [string, 'null']
+        stale_because:
+          type: [string, 'null']
+          enum: [closed, merged, not_found, gone, null]
+
+    EventDataDriftCompleted:
+      allOf:
+        - $ref: '#/components/schemas/EventDataRunCompleted'
+        - type: object
+          required: [sha, drifted]
+          properties:
+            sha:
+              $ref: '#/components/schemas/Sha'
+            config_digest:
+              $ref: '#/components/schemas/ConfigDigest'
+            drifted:
+              type: array
+              items:
+                type: string
+
+    EventDataRun:
+      type: object
+      properties:
+        mode:
+          type: [string, 'null']
+          enum: [check, apply, null]
+        sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        limit:
+          type: [string, 'null']
+        playbook:
+          type: [string, 'null']
+        reason:
+          oneOf:
+            - $ref: '#/components/schemas/Text'
+            - type: 'null'
+        intent:
+          oneOf:
+            - $ref: '#/components/schemas/Text'
+            - type: 'null'
+        intent_ref:
+          type: [string, 'null']
+          format: uri
+        certificate_serial:
+          type: [string, 'null']
+        certificate_expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        status:
+          type: [integer, 'null']
+          description: run.refused only, the HTTP status returned
+        error_code:
+          type: [string, 'null']
+          description: run.refused only
+        ok:
+          type: [boolean, 'null']
+          description: run.finished only
+        counts:
+          type: [object, 'null']
+          description: run.finished only
+        asserted_by_client:
+          type: [boolean, 'null']
+          description: true on run.finished
+
+    EventDataWebhookReceived:
+      type: object
+      required: [event, outcome]
+      properties:
+        delivery_id:
+          type: [string, 'null']
+        event:
+          type: string
+          description: The code host's event kind, for example pull_request or issue_comment
+        head_sha:
+          oneOf:
+            - $ref: '#/components/schemas/Sha'
+            - type: 'null'
+        command:
+          type: [string, 'null']
+          enum: [plan, apply, unlock, help, null]
+        outcome:
+          type: string
+          enum: [queued, ignored, duplicate]
+
+    EventDataWebhookRejected:
+      type: object
+      required: [reason, suppressed]
+      properties:
+        reason:
+          type: string
+          enum: [bad_auth, duplicate, stale, future, undated, bad_json, foreign_repo, no_access,
+                 head_moved, disabled, queue_full, too_large, bad_request]
+        delivery_id:
+          type: [string, 'null']
+        suppressed:
+          type: integer
+          minimum: 0
+
+    EventDataAudit:
+      type: object
+      description: Payloads of the audit.* and service events
+      properties:
+        signing:
+          type: [boolean, 'null']
+        backend:
+          type: [string, 'null']
+        default_branch:
+          type: [string, 'null']
+        switch:
+          type: [string, 'null']
+          enum: [apply, plan, autoplan, null]
+        enabled:
+          type: [boolean, 'null']
+        checkpoint_id:
+          oneOf:
+            - $ref: '#/components/schemas/CheckpointId'
+            - type: 'null'
+        covers_seq:
+          type: [integer, 'null']
+        covers_hash:
+          oneOf:
+            - $ref: '#/components/schemas/Hash'
+            - type: 'null'
+        key_id:
+          type: [string, 'null']
+        redacted_actors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActorId'
+        redacted_texts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Hash'
+        first_seq:
+          type: [integer, 'null']
+
+  examples:
+    ChangeApplied:
+      summary: A PR planned, approved, applied and merged
+      value:
+        change:
+          backend: github
+          repository: example/infra
+          number: 42
+          url: https://github.example.com/example/infra/pull/42
+        state: merged
+        change_ref:
+          value: CHG-1234
+          source: description_trailer
+          verified: false
+          matches_plan: null
+        author:
+          id: act_01JDQ40W2E4R6T8Y0V2J406P8A
+          kind: human
+          via: push
+          login: alice
+          redacted: false
+        plans:
+          - plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+            status: completed
+            inventory: prod
+            head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+            clean: true
+            requested_at: '2026-11-25T02:51:03.112Z'
+            completed_at: '2026-11-25T02:53:40.587Z'
+        applies:
+          - apply_id: apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W
+            plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+            status: completed
+            inventory: prod
+            head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+            verdict: match
+            requested_at: '2026-11-25T03:12:10.004Z'
+            completed_at: '2026-11-25T03:14:07.123Z'
+        approvals:
+          - event_id: evt_01JDX8KR0A1B2C3D4E5F6G7H8J
+            approver:
+              id: act_01JDQ41B3C5D7E9F1G3H5J7K9M
+              kind: human
+              via: review
+              login: bob
+              redacted: false
+            approved_at: '2026-11-25T03:05:44.000Z'
+            head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+            head_source: review_commit
+            counted: true
+            reason: counted
+            observed_at: '2026-11-25T03:12:11.230Z'
+        locks:
+          - event_id: evt_01JDX7ZM1A2B3C4D5E6F7G8H9J
+            type: lock.acquired
+            inventory: prod
+            at: '2026-11-25T02:51:05.310Z'
+            reason: null
+          - event_id: evt_01JDX9A0B1C2D3E4F5G6H7J8K9
+            type: lock.released
+            inventory: prod
+            at: '2026-11-25T03:20:02.771Z'
+            reason: merged
+        events_url: /events?change=42&order=seq
+
+    PlanCompleted:
+      summary: A clean plan for two hosts
+      value:
+        plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+        status: completed
+        change:
+          backend: github
+          repository: example/infra
+          number: 42
+        change_ref:
+          value: CHG-1234
+          source: description_trailer
+          verified: false
+        inventory: prod
+        head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+        base_sha: 0a1b2c3d4e5f60718293a4b5c6d7e8f901234567
+        config_digest:
+          sha256: sha256:8c1f0e6a2b3d4c5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6
+          short: 8c1f0e6a2b3d4c5e
+          artifact:
+            sha256: c47d90e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d
+            bytes: 2410
+            stored: true
+            url: /artifacts/c47d90e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d
+        scope:
+          limit: webservers
+          everything: false
+          noop: false
+          reasons:
+            - file: roles/nginx/templates/site.conf.j2
+              why: role nginx, used by group webservers
+        policy:
+          passed: true
+          violations: []
+        requested_by:
+          id: act_01JDQ40W2E4R6T8Y0V2J406P8A
+          kind: human
+          via: push
+          login: alice
+          redacted: false
+        trigger: autoplan
+        refusal: null
+        clean: true
+        rc: 0
+        totals: {hosts: 2, ok: 0, changed: 2, failed: 0, unreachable: 0, blocked: 0}
+        hosts:
+          - host: web-1.example.com
+            state: changed
+            ok_tasks: 41
+            changed_tasks: 1
+            failed_tasks: 0
+            skipped_tasks: 3
+            unreachable: false
+            blocked_reason: null
+            changes:
+              - key: 'nginx/Install site config#1'
+                status: changed
+                diff_hash: sha256:4be1a2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef0123456789abcd
+                no_log: false
+            diff_hash: sha256:a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+            artifact:
+              sha256: a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+              bytes: 1832
+              stored: true
+              url: /artifacts/a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+          - host: web-2.example.com
+            state: changed
+            ok_tasks: 41
+            changed_tasks: 1
+            failed_tasks: 0
+            skipped_tasks: 3
+            unreachable: false
+            blocked_reason: null
+            changes:
+              - key: 'nginx/Install site config#1'
+                status: changed
+                diff_hash: sha256:4be1a2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef0123456789abcd
+                no_log: false
+            diff_hash: sha256:a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+            artifact:
+              sha256: a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+              bytes: 1832
+              stored: true
+        record:
+          comment_url: https://github.example.com/example/infra/pull/42#issuecomment-1001
+          mac: 3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a
+        requested_at: '2026-11-25T02:51:03.112Z'
+        started_at: '2026-11-25T02:51:05.310Z'
+        completed_at: '2026-11-25T02:53:40.587Z'
+        duration_ms: 155277
+        consumed_by: [apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W]
+        event_ids:
+          - evt_01JDX7ZK3B9C8D7E6F5G4H3J2K
+          - evt_01JDX7ZM0A9B8C7D6E5F4G3H2J
+          - evt_01JDX7ZM1A2B3C4D5E6F7G8H9J
+          - evt_01JDX80Q2R3S4T5V6W7X8Y9Z0A
+
+    ApplyDiverged:
+      summary: An apply whose result differed from the plan on one host
+      value:
+        apply_id: apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W
+        plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+        status: completed
+        change:
+          backend: github
+          repository: example/infra
+          number: 42
+        change_ref:
+          value: CHG-1234
+          source: description_trailer
+          verified: false
+          matches_plan: true
+        inventory: prod
+        head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+        requested_by:
+          id: act_01JDQ40W2E4R6T8Y0V2J406P8A
+          kind: human
+          via: comment
+          login: alice
+          redacted: false
+        approvals:
+          - event_id: evt_01JDX8KR0A1B2C3D4E5F6G7H8J
+            approver:
+              id: act_01JDQ41B3C5D7E9F1G3H5J7K9M
+              kind: human
+              via: review
+              login: bob
+              redacted: false
+            approved_at: '2026-11-25T03:05:44.000Z'
+            head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+            head_source: review_commit
+            counted: true
+            reason: counted
+            observed_at: '2026-11-25T03:12:11.230Z'
+          - event_id: evt_01JDX8KR1B2C3D4E5F6G7H8J9K
+            approver:
+              id: act_01JDQ42C4D6E8F0G2H4J6K8M0N
+              kind: human
+              via: review
+              login: carol
+              redacted: false
+            approved_at: '2026-11-25T02:40:02.000Z'
+            head_sha: 9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d
+            head_source: review_commit
+            counted: false
+            reason: not_head
+            observed_at: '2026-11-25T03:12:11.230Z'
+        gates:
+          passed: true
+          stage: null
+          reasons: []
+        clean: true
+        rc: 0
+        totals: {hosts: 2, ok: 0, changed: 2, failed: 0, unreachable: 0, blocked: 0}
+        hosts:
+          - host: web-1.example.com
+            state: changed
+            changed_tasks: 1
+            failed_tasks: 0
+            diff_hash: sha256:a91f00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+          - host: web-2.example.com
+            state: changed
+            changed_tasks: 1
+            failed_tasks: 0
+            changes:
+              - key: 'nginx/Install site config#1'
+                status: changed
+                diff_hash: sha256:07c3ffeeddccbbaa99887766554433221100ffeeddccbbaa9988776655443322
+                no_log: false
+            diff_hash: sha256:5d2e00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+            artifact:
+              sha256: 5d2e00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+              bytes: 1911
+              stored: true
+              url: /artifacts/5d2e00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+        verdict:
+          algorithm: ferry.verdict/v1
+          result: diverged
+          unverifiable_because: null
+          divergences:
+            - host: web-2.example.com
+              kind: diff_mismatch
+              task: 'nginx/Install site config#1'
+              planned_hash: sha256:4be1a2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef0123456789abcd
+              applied_hash: sha256:07c3ffeeddccbbaa99887766554433221100ffeeddccbbaa9988776655443322
+        requested_at: '2026-11-25T03:12:10.004Z'
+        started_at: '2026-11-25T03:12:13.551Z'
+        completed_at: '2026-11-25T03:14:07.123Z'
+        duration_ms: 113572
+        event_ids:
+          - evt_01JDX8KQ6A7B8C9D0E1F2G3H4J
+          - evt_01JDX8KR0A1B2C3D4E5F6G7H8J
+          - evt_01JDX8KR1B2C3D4E5F6G7H8J9K
+          - evt_01JDX8KS2C3D4E5F6G7H8J9K0M
+          - evt_01JDX8M2Q4K7N9P3R5T6V8W0YZ
+
+    ApplyRefused:
+      summary: An apply refused before credentials were minted
+      value:
+        apply_id: apl_01JDX9Q1R2S3T4V5W6X7Y8Z9A0
+        plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+        status: refused
+        change:
+          backend: gitlab
+          repository: example/infra
+          number: 7
+        change_ref: null
+        inventory: prod
+        head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+        requested_by:
+          id: act_01JDQ40W2E4R6T8Y0V2J406P8A
+          kind: human
+          via: comment
+          login: alice
+          redacted: false
+        approvals: []
+        gates:
+          passed: false
+          stage: precheck
+          reasons:
+            - needs 1 approval(s) from someone other than the author and anyone who pushed to it with write access (Developer+ on GitLab), has 0
+            - '`prod` requires a change request: add a `Change-Request:` trailer to the description and re-run the plan'
+        clean: null
+        rc: null
+        totals: null
+        hosts: []
+        verdict: null
+        requested_at: '2026-11-25T03:30:00.000Z'
+        started_at: null
+        completed_at: null
+        duration_ms: null
+
+    RunByAgent:
+      summary: A check-mode operator run by an agent acting for a person
+      value:
+        run_id: 6c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f
+        status: finished
+        actor:
+          id: act_01JDQ4A0B1C2D3E4F5G6H7J8K9
+          kind: agent
+          via: cli
+          issuer: https://id.example.com
+          subject: agent:deploy-assistant
+          display_name: deploy assistant
+          redacted: false
+          on_behalf_of:
+            id: act_01JDQ41B3C5D7E9F1G3H5J7K9M
+            kind: human
+            via: cli
+            issuer: https://id.example.com
+            subject: bob@example.com
+            display_name: Bob
+            redacted: false
+        inventory: prod
+        mode: check
+        sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+        limit: web-1.example.com
+        playbook: site.yml
+        change_ref:
+          value: https://tickets.example.com/CHG-1240
+          source: cli_flag
+          verified: false
+        reason:
+          commitment: sha256:1d9a00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+          redacted: false
+          text: check nginx config before the change window
+          salt: q83vEjRWeJq83vEjRWeJqw==
+        intent:
+          commitment: sha256:2e0b00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+          redacted: false
+          text: Asked to confirm web-1 matches main before CHG-1240.
+          salt: 3q2+796tvu/erb7v3q2+7w==
+        intent_ref: https://agents.example.com/runs/7f3c
+        certificate_serial: '1732504447123456'
+        certificate_expires_at: '2026-11-25T03:29:07.000Z'
+        issued_at: '2026-11-25T03:14:07.000Z'
+        finished_at: '2026-11-25T03:16:30.000Z'
+        result:
+          ok: true
+          counts: {hosts: 1, changed_tasks: 0, failed_tasks: 0}
+          asserted_by_client: true
+        verdict:
+          algorithm: ferry.verdict/v1
+          result: unverifiable
+          unverifiable_because: operator_run
+          divergences: []
+
+    EventPageApprovals:
+      summary: Approval observations for one apply
+      value:
+        events:
+          - schema: ferry.audit/v1
+            chain_id: chn_01JDQ3V6Z1W8K2X9M4T5R7Y0BC
+            seq: 1039
+            id: evt_01JDX8KR0A1B2C3D4E5F6G7H8J
+            type: approval.observed
+            at: '2026-11-25T03:12:11.230Z'
+            ferry_version: 0.5.0
+            change: {backend: github, repository: example/infra, number: 42}
+            change_ref: CHG-1234
+            inventory: prod
+            plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+            apply_id: apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W
+            run_id: null
+            actor: {id: act_01JDQ41B3C5D7E9F1G3H5J7K9M, kind: human, via: review, login: bob, redacted: false}
+            data:
+              approver: act_01JDQ41B3C5D7E9F1G3H5J7K9M
+              approved_at: '2026-11-25T03:05:44.000Z'
+              head_sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+              head_source: review_commit
+              counted: true
+              reason: counted
+            prev_hash: sha256:6f1c00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+            hash: sha256:7a2d00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+        next_cursor: eyJzZXEiOjEwMzl9
+        head:
+          seq: 1042
+          hash: sha256:9b2e00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+
+    InventoryHistory:
+      summary: Recent history of one inventory
+      value:
+        entries:
+          - kind: apply
+            at: '2026-11-25T03:14:07.123Z'
+            event_id: evt_01JDX8M2Q4K7N9P3R5T6V8W0YZ
+            plan_id: pln_01JDX7ZK3A9B8C7D6E5F4G3H2J
+            apply_id: apl_01JDX8KQ5M4N3P2Q1R0S9T8V7W
+            run_id: null
+            change: {backend: github, repository: example/infra, number: 42}
+            sha: 5f0c2a1e9d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a
+            result: ok
+            actor: {id: act_01JDQ40W2E4R6T8Y0V2J406P8A, kind: human, via: comment, login: alice, redacted: false}
+          - kind: drift
+            at: '2026-11-25T02:00:12.400Z'
+            event_id: evt_01JDX3T4V5W6X7Y8Z9A0B1C2D3
+            plan_id: null
+            apply_id: null
+            run_id: null
+            change: null
+            sha: 0a1b2c3d4e5f60718293a4b5c6d7e8f901234567
+            result: drifted
+            actor: {id: act_01JDQ3V7A8B9C0D1E2F3G4H5J6, kind: service, via: schedule, redacted: false}
+        next_cursor: null
+
+    HostArtifact:
+      summary: The redacted per-host result an apply's diff_hash covers
+      value:
+        schema: ferry.audit.host-result/v1
+        host: web-2.example.com
+        kind: apply
+        truncated: false
+        tasks:
+          - key: 'nginx/Install site config#1'
+            task: Install site config
+            role: nginx
+            status: changed
+            no_log: false
+            diffs:
+              - |
+                --- before: /etc/nginx/sites-enabled/site.conf
+                +++ after: /etc/nginx/sites-enabled/site.conf
+                @@ -3 +3 @@
+                -    worker_connections 512;
+                +    worker_connections 1024;
+            msg: null
+
+    CheckpointSigned:
+      summary: A signed checkpoint
+      value:
+        schema: ferry.audit.checkpoint/v1
+        checkpoint_id: ckp_01JDX9B0C1D2E3F4G5H6J7K8M9
+        chain_id: chn_01JDQ3V6Z1W8K2X9M4T5R7Y0BC
+        seq: 2000
+        hash: sha256:9b2e00112233445566778899aabbccddeeff00112233445566778899aabbccdd
+        at: '2026-11-25T04:00:00.000Z'
+        previous_checkpoint_id: ckp_01JDX1A0B1C2D3E4F5G6H7J8K9
+        key_id: 'ed25519:3a7f9c0e'
+        signature: 0FJ0kH3C0e6mJv8Qd8m3m5c3Yb7qG2a1k0Zr6p9s4t2u8w1x5y7z3A6B9C2D5E8F1G4H7J0K3M6N9P2Q5R8S==

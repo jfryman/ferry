@@ -179,5 +179,6 @@ entry should tell an operator what changed for them and whether they need to do 
 | [docs/operations.md](docs/operations.md) | Runbooks |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Refusal messages |
 | [docs/development.md](docs/development.md) | Tests, lab, releasing |
+| [docs/rfcs/](docs/rfcs/README.md) | Design proposals, not yet implemented |
 | [deploy/local/README.md](deploy/local/README.md) | The local lab |
 | [lode/](lode/lode-map.md) | Design notes |
