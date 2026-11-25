@@ -112,6 +112,10 @@ class H(BaseHTTPRequestHandler):
                  "created_at": "now"}
             state["comments"].append(c)
             return self._j(201, c)
+        if self.path.startswith(f"{R}/issues/comments/") and self.path.endswith("/reactions"):  # #89
+            cid = int(self.path.split("/")[-2])
+            state.setdefault("reactions", []).append({"comment": cid, "content": d.get("content")})
+            return self._j(201, {"content": d.get("content")})
         if self.path.startswith(f"{R}/statuses/"):  # #29: the latest state per context wins
             sha = self.path.rsplit("/", 1)[-1]
             state["statuses"].setdefault(sha, {})[d["context"]] = {
@@ -134,6 +138,18 @@ class H(BaseHTTPRequestHandler):
             state["reviews"].append({"user": {"login": d.get("user", "james")}, "state": "APPROVED",
                                      "commit_id": head()})
             return self._j(200, {"approved": head()})
+        self._j(404, {"message": "Not Found"})
+
+    def do_PATCH(self):  # #89: ferry edits its ack into the result
+        n = int(self.headers.get("Content-Length") or 0)
+        d = json.loads(self.rfile.read(n) or b"{}")
+        if self.path.startswith(f"{R}/issues/comments/"):
+            cid = int(self.path.rsplit("/", 1)[-1])
+            for c in state["comments"]:
+                if c["id"] == cid:
+                    c["body"] = d["body"]
+                    c["edits"] = c.get("edits", 0) + 1
+                    return self._j(200, c)
         self._j(404, {"message": "Not Found"})
 
     def log_message(self, fmt, *args):

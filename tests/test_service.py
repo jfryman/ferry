@@ -105,9 +105,17 @@ class World:
         return self.runner
 
     def _post(self, q, d):
-        c = {"id": len(self.comments) + 1, "user": {"login": BOT}, "body": d["body"], "created_at": "t"}
+        self._comment_ids = getattr(self, "_comment_ids", 0) + 1  # ids are never reused
+        c = {"id": self._comment_ids, "user": {"login": BOT}, "body": d["body"], "created_at": "t"}
         self.comments.append(c)
+        self.gh.routes[("PATCH", f"{R}/issues/comments/{c['id']}")] = lambda q, d, c=c: self._edit(c, d)
         return 201, c
+
+    def _edit(self, c, d):
+        if c not in self.comments:  # deleted
+            return 404, {"message": "Not Found"}
+        c["body"] = d["body"]
+        return 200, c
 
     def deliver(self, event, payload, delivery=None):
         self._n = getattr(self, "_n", 0) + 1
@@ -128,6 +136,9 @@ class World:
 
     def comment_event(self, body, user="james", at=NOW_ISO, updated=None, cid=None):
         self._cid = getattr(self, "_cid", 1000) + 1  # every comment is a new comment unless cid says
+        self.reactions = getattr(self, "reactions", [])
+        self.gh.routes[("POST", f"{R}/issues/comments/{self._cid if cid is None else cid}/reactions")] = (
+            lambda q, d, c=(self._cid if cid is None else cid): (self.reactions.append((c, d["content"])), (201, d))[1])
         return {"action": "created", "repository": {"full_name": "acme/ansible"},
                 "issue": {"number": 1, "pull_request": {}},
                 "comment": {"id": self._cid if cid is None else cid, "user": {"login": user}, "body": body,
@@ -1266,7 +1277,9 @@ def test_plan_and_apply_move_their_statuses(world):
     world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
     world.deliver("issue_comment", world.comment_event("/ferry apply"))
     world.drain()
-    assert [s for s, _ in states(posted, "ferry/apply: homelab")] == ["pending", "pending", "success"]
+    assert states(posted, "ferry/apply: homelab") == [  # queued and running as the ack says (#89)
+        ("pending", "planned; not applied yet"), ("pending", "queued"), ("pending", "running"),
+        ("success", "applied by james")]
 
 
 def test_a_failed_plan_and_a_failed_apply_fail_their_statuses(world):
@@ -1291,7 +1304,8 @@ def test_a_refused_apply_leaves_the_apply_status_pending(world):
     world.drain()
     world.deliver("issue_comment", world.comment_event("/ferry apply"))  # no approval: refused
     world.drain()
-    assert [s for s, _ in states(posted, "ferry/apply: homelab")] == ["pending"]
+    assert [s for s, _ in states(posted, "ferry/apply: homelab")] == ["pending"] * 4
+    assert states(posted, "ferry/apply: homelab")[-1] == ("pending", "not applied")
 
 
 def test_a_noop_plan_marks_apply_done(world):
@@ -1488,3 +1502,180 @@ def test_local_drift_recovery_fails_closed_without_executor(world):
     world.locks.try_acquire(Lock('homelab', 'drift', world.sha, 'schedule', NOW))
     world.svc.recover_drift()
     assert world.locks.get('homelab').holder == 'drift'
+
+
+# ---- #89: ack straight away, then edit that comment into the result --------------------------------
+
+ACK = "\u23f3 **ferry"
+
+
+def bot_comments(world):
+    return [c for c in world.comments if c["user"]["login"] == BOT]
+
+
+def test_a_command_is_acked_at_once_and_the_ack_becomes_the_result(world):
+    seen = []
+    runner_run = world.runner.run
+
+    def run(req):  # while ansible runs, the ack says so
+        seen.append(world.comments[-1]["body"])
+        return runner_run(req)
+    world.runner.run = run
+    ev = world.comment_event("/ferry plan homelab")
+    assert world.deliver("issue_comment", ev)[1] == "plan queued"
+    [ack] = world.comments  # before the worker got to it
+    assert ack["body"].startswith(ACK) and "`homelab` @ `" + world.sha[:8] + "` queued (job 1)" in ack["body"]
+    assert "ferry:" not in ack["body"]  # no marker in an ack
+    assert world.reactions == [(ev["comment"]["id"], "eyes")]
+    [plan] = world.drain()
+    assert plan["ok"]
+    assert "running (job 1)" in seen[0]
+    [result] = world.comments  # one comment per job: the ack, edited
+    assert result["id"] == ack["id"] and result["body"].startswith("### ferry plan: `homelab`")
+    assert result["body"].rstrip().splitlines()[-1].startswith("<!-- ferry:plan ")
+
+    # The apply gates read the edited comment's marker as they read a new one.
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply homelab"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+    assert len(world.comments) == 2 and "ferry apply: `homelab`" in world.comments[-1]["body"]
+    assert "ferry:apply" in world.comments[-1]["body"]
+
+
+def test_an_automatic_plan_is_acked_too(world):
+    world.deliver("pull_request", world.pr_event())
+    assert world.comments[0]["body"].startswith(ACK + " plan** @ `")
+    world.drain()
+    assert len(world.comments) == 1 and "ferry:plan" in world.comments[0]["body"]
+
+
+def test_a_refusal_edits_the_ack(world):
+    world.deliver("pull_request", world.pr_event())
+    world.drain()
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))  # not approved
+    [refused] = world.drain()
+    assert refused["result"] == "refused"
+    assert len(world.comments) == 2
+    assert "refused" in world.comments[-1]["body"] and "approval" in world.comments[-1]["body"]
+    assert ACK not in world.comments[-1]["body"]
+
+
+def test_a_lock_refusal_edits_the_ack(world):
+    world.locks.try_acquire(new_lock("homelab", 7, "c" * 40, "pip"))
+    world.gh.routes[("GET", f"{R}/pulls/7")] = pr_json(number=7, sha="c" * 40)
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.drain()
+    [c] = world.comments
+    assert "not run" in c["body"] and "locked by !7" in c["body"]
+
+
+def test_a_pr_moved_after_the_comment_edits_the_ack(world):
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.svc.vcs.get_change_request = lambda n: type("CR", (), {"open": True, "head_sha": "f" * 40, "state": "opened"})()
+    [r] = world.drain()
+    assert r["result"] == "skipped"
+    [c] = world.comments
+    assert "not run" in c["body"] and "moved" in c["body"]
+
+
+@pytest.mark.parametrize("how", ["deleted", "forbidden"])
+def test_an_ack_that_cannot_be_edited_falls_back_to_a_new_comment(world, how):
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    ack = world.comments[0]
+    if how == "deleted":
+        world.comments.remove(ack)
+    else:
+        world.gh.routes[("PATCH", f"{R}/issues/comments/{ack['id']}")] = lambda q, d: (403, {"message": "no"})
+    [plan] = world.drain()
+    assert plan["ok"]
+    assert "ferry:plan" in world.comments[-1]["body"] and world.comments[-1]["id"] != ack["id"]
+    if how == "forbidden":
+        assert world.comments[0]["body"].startswith(ACK)  # left as it was: ferry can't touch it
+    # ... and the plan in the new comment applies.
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+
+
+def test_a_new_comment_fences_the_acks_queued_before_it(world):
+    """A plan whose ack can't be edited posts its result last; an unlock queued behind it must not
+    land above it, or the plan would look newer than the unlock that released its lock."""
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.deliver("issue_comment", world.comment_event("/ferry unlock"))
+    plan_ack, unlock_ack = world.comments
+    world.gh.routes[("PATCH", f"{R}/issues/comments/{plan_ack['id']}")] = lambda q, d: (404, {"message": "gone"})
+    plan, unlock = world.drain()
+    assert plan["ok"] and unlock["released"] == ["homelab"]
+    bodies = [c["body"] for c in world.comments]
+    assert "ferry:plan" in bodies[2] and "ferry:unlock" in bodies[3]  # in the order they ran
+    assert "done (job 2)" in unlock_ack["body"] and "comment below" in unlock_ack["body"]
+    world.reviews.append({"user": {"login": "james"}, "state": "APPROVED", "commit_id": world.sha})
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    [refused] = world.drain()
+    assert any("/ferry unlock" in r for r in refused["inventories"]["homelab"]["reasons"])
+
+
+def test_a_failed_ack_or_reaction_never_stops_the_job(world):
+    world.gh.routes[("POST", f"{R}/issues/1/comments")] = lambda q, d: (502, {"message": "bad gateway"})
+    ev = world.comment_event("/ferry plan")
+    world.gh.routes[("POST", f"{R}/issues/comments/{ev['comment']['id']}/reactions")] = lambda q, d: (500, {})
+    assert world.deliver("issue_comment", ev)[1] == "plan queued"
+    world.gh.routes[("POST", f"{R}/issues/1/comments")] = world._post
+    [plan] = world.drain()
+    assert plan["ok"] and len(world.comments) == 1 and "ferry:plan" in world.comments[0]["body"]
+
+
+def test_no_ack_for_an_automatic_plan_into_a_branch_ferry_does_not_handle(world):
+    world.base = "release"
+    world.deliver("pull_request", world.pr_event())
+    assert not world.comments
+    [r] = world.drain()
+    assert r["result"] == "skipped" and not world.comments
+
+
+def test_an_automatic_plan_that_is_skipped_says_so_on_its_ack(world, monkeypatch):
+    world.deliver("pull_request", world.pr_event())
+    monkeypatch.setenv("FERRY_DISABLE_AUTOPLAN", "1")
+    world.svc.settings.disable_autoplan = True
+    [r] = world.drain()
+    assert r["result"] == "skipped"
+    [c] = world.comments
+    assert "skipped (job 1)" in c["body"] and "switched off" in c["body"]
+
+
+def test_the_ack_id_is_stored_with_the_job_and_not_served(world):
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    assert world.svc.state.jobs() == []  # queued: not in the history yet
+    assert world.svc.state.unfinished_jobs()[0]["ack"] == world.comments[0]["id"]
+    world.drain()
+    [job] = world.svc.state.jobs()
+    assert job["id"] == 1 and job["result"] == "ok" and "ack" not in job
+    assert world.svc.state.unfinished_jobs() == []
+
+
+def test_a_restart_closes_the_acks_it_left_behind(world, tmp_path):
+    from ferry.state import SQLiteState
+    world.svc.state = SQLiteState(tmp_path / "state.db")
+    world.svc.state.saw_head(1, world.sha, NOW - 120)
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    world.deliver("issue_comment", world.comment_event("/ferry apply"))
+    world.svc.state.update_job(1, {"result": "running"})  # the first one was running
+    world.svc.state = SQLiteState(tmp_path / "state.db")  # the service restarts; its queue is gone
+    world.svc.recover_acks()
+    first, second = (c["body"] for c in world.comments)
+    assert "stopped (job 1)" in first and "restarted while this job ran" in first
+    assert "stopped (job 2)" in second and "Nothing ran" in second and "/ferry apply" in second
+    assert [j["result"] for j in world.svc.state.jobs()] == ["error", "error"]
+    assert world.svc.state.unfinished_jobs() == []
+
+
+def test_queued_statuses_for_known_inventories(world):
+    posted = record_statuses(world)
+    world.deliver("pull_request", world.pr_event())  # the first job: ferry doesn't know the inventories yet
+    world.drain()
+    world.deliver("issue_comment", world.comment_event("/ferry plan"))
+    assert states(posted, "ferry/plan: homelab")[-1] == ("pending", "queued")
+    world.deliver("issue_comment", world.comment_event("/ferry plan nope"))  # not an inventory: no status
+    assert not states(posted, "ferry/plan: nope")

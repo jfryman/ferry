@@ -221,3 +221,22 @@ neither add series nor smuggle text into `/metrics`. Rejects are classified from
 (`reject_reason`) in `Service.receive` and the HTTP handler, the same for both backends. Job history
 is a bounded `jobs` table in the state file (`FERRY_JOB_HISTORY`, default 200), served read-only at
 `/jobs` without error text or reasons, for the same reason `/healthz` has none.
+
+## Ack, then edit that comment into the result (#89)
+A queued plan, apply or `/ferry unlock` posts one comment at once and the worker edits it to
+`running` and then replaces it with its first result (`Service._post_result`, also what the job's
+engines post through via `_JobVCS`). The plan record stays the last line of a comment by ferry's own
+account, so `Engine._latest_plan_or_unlock` and invariant 8 are unchanged. That function takes the
+newest record by comment position, and an edited comment keeps its creation position, so ordering
+had to be kept: (1) the ack is posted and the job queued under one mutex (`_enqueue_mutex`), so acks
+on a change are in queue order, which is the order jobs run; (2) when a job has to write a new
+comment (an edit failed, a second inventory), every job queued before that moment has an older ack,
+so `_fence[pr]` records the queue seq and those jobs write new comments too. Without the fence, a
+plan that fell back to a new comment would sit below the edited ack of an unlock queued after it
+and look newer. Rejected: ordering records by their `at` field (would change what makes a record
+trusted), and deleting acks (notifications are already sent; a quiet skip edits the ack instead).
+Automatic plans into a base branch ferry doesn't handle get no ack (bases from the last
+`ferry.yaml` loaded). Jobs are opened in the state file at enqueue (`result` `queued`/`running`,
+the ack id in a column `/jobs` doesn't serve); at startup `recover_acks` closes the ones a restart
+left behind. A rate-limited progress line during long runs was left out: the runner has no event
+stream to hang it on yet.

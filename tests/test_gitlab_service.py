@@ -98,9 +98,17 @@ class World:
         return self.runner
 
     def _post(self, url, d):
-        n = {"id": len(self.notes) + 1, "author": {"username": BOT}, "body": d["body"], "created_at": "t"}
+        self._note_ids = getattr(self, "_note_ids", 0) + 1  # ids are never reused
+        n = {"id": self._note_ids, "author": {"username": BOT}, "body": d["body"], "created_at": "t"}
         self.notes.append(n)
+        self.gl.routes[("PUT", f"{MR}/notes/{n['id']}")] = lambda u, d, n=n: self._edit(n, d)
         return 201, n
+
+    def _edit(self, n, d):
+        if n not in self.notes:  # deleted
+            return 404, {"message": "404 Not found"}
+        n["body"] = d["body"]
+        return 200, n
 
     def deliver(self, event, payload, delivery=None, token=SECRET.decode()):
         self._n = getattr(self, "_n", 0) + 1
@@ -120,6 +128,9 @@ class World:
 
     def note_event(self, note, user="alice", noteable="MergeRequest", at=NOW_GL, updated=None, head=None, nid=None):
         self._nid = getattr(self, "_nid", 5000) + 1  # every note is a new note unless nid says
+        self.awards = getattr(self, "awards", [])
+        self.gl.routes[("POST", f"{MR}/notes/{self._nid if nid is None else nid}/award_emoji")] = (
+            lambda u, d, i=(self._nid if nid is None else nid): (self.awards.append((i, d["name"])), (201, d))[1])
         return {"object_kind": "note", "user": {"username": user},
                 "project": {"id": 9, "path_with_namespace": "acme/ansible"},
                 "object_attributes": {"id": self._nid if nid is None else nid,
@@ -873,3 +884,62 @@ def test_help_and_bad_notes_get_one_rate_limited_reply(world):
     for body in ("lgtm", "try /ferry aply", "/ferryboat"):
         assert world.deliver("Note Hook", world.note_event(body))[1] == "not a ferry command"
     assert len(world.notes) == n and world.svc.jobs.empty()
+
+
+# ---- #89: ack straight away, then edit that note into the result -----------------------------------
+
+ACK = "\u23f3 **ferry"
+
+
+def test_a_note_command_is_acked_and_the_ack_becomes_the_result(world):
+    ev = world.note_event("/ferry plan")
+    assert world.deliver("Note Hook", ev)[1] == "plan queued"
+    [ack] = world.notes
+    assert ack["body"].startswith(ACK) and "queued (job 1)" in ack["body"] and "ferry:" not in ack["body"]
+    assert world.awards == [(ev["object_attributes"]["id"], "eyes")]
+    [plan] = world.drain()
+    assert plan["ok"]
+    [result] = world.notes
+    assert result["id"] == ack["id"] and result["body"].rstrip().splitlines()[-1].startswith("<!-- ferry:plan ")
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    world.deliver("Note Hook", world.note_event("/ferry apply", user="alice"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+    assert len(world.notes) == 2 and "ferry:apply" in world.notes[-1]["body"]
+
+
+def test_an_automatic_plan_is_acked_on_gitlab(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    assert world.notes[0]["body"].startswith(ACK)
+    world.drain()
+    assert len(world.notes) == 1 and "ferry:plan" in world.notes[0]["body"]
+
+
+def test_a_refusal_edits_the_ack_on_gitlab(world):
+    world.deliver("Merge Request Hook", world.mr_event())
+    world.drain()
+    world.deliver("Note Hook", world.note_event("/ferry apply"))  # not approved
+    [refused] = world.drain()
+    assert refused["result"] == "refused"
+    assert len(world.notes) == 2 and "refused" in world.notes[-1]["body"]
+
+
+def test_an_ack_that_cannot_be_edited_falls_back_on_gitlab(world):
+    world.deliver("Note Hook", world.note_event("/ferry plan"))
+    world.notes.clear()  # someone deleted the ack
+    [plan] = world.drain()
+    assert plan["ok"]
+    [result] = world.notes
+    assert result["id"] == 2 and "ferry:plan" in result["body"]
+    world.approved_by = [{"user": {"username": "alice"}, "approved_at": "2026-11-20T12:05:00Z"}]
+    world.deliver("Note Hook", world.note_event("/ferry apply", user="alice"))
+    [applied] = world.drain()
+    assert applied["ok"], applied
+
+
+def test_a_failed_award_never_stops_the_job_on_gitlab(world):
+    ev = world.note_event("/ferry plan")
+    world.gl.routes[("POST", f"{MR}/notes/{ev['object_attributes']['id']}/award_emoji")] = lambda u, d: (403, {})
+    assert world.deliver("Note Hook", ev)[1] == "plan queued"
+    [plan] = world.drain()
+    assert plan["ok"]

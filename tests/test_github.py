@@ -190,6 +190,21 @@ def test_notes_are_issue_comments(gh):
     assert be.post_note(7, "hello").body == "hello"
 
 
+def test_notes_can_be_edited_and_reacted_to(gh):
+    """#89: the ack is edited in place; the triggering comment gets an eyes reaction."""
+    fake, _, be = gh
+    fake.routes[("PATCH", f"{R}/issues/comments/3")] = lambda q, d: (
+        200, {"id": 3, "user": {"login": "ferry-acme[bot]"}, "body": d["body"], "created_at": "t3"})
+    fake.routes[("POST", f"{R}/issues/comments/9/reactions")] = lambda q, d: (201, {"content": d["content"]})
+    assert be.edit_note(7, 3, "result").body == "result"
+    be.react(7, 9)
+    assert fake.calls[-2] == ("PATCH", f"{R}/issues/comments/3", {}, {"body": "result"})
+    assert fake.calls[-1] == ("POST", f"{R}/issues/comments/9/reactions", {}, {"content": "eyes"})
+    with pytest.raises(GitHubError) as e:
+        be.edit_note(7, 4, "gone")  # deleted: 404, the caller falls back to a new comment
+    assert e.value.status == 404
+
+
 def test_bot_username_prefers_configured_login(gh):
     fake, client, be = gh
     assert be.bot_username() == "ferry-acme[bot]"

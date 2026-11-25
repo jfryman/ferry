@@ -309,6 +309,15 @@ class GitHubBackend:
         c = self.client.request("POST", f"{self._r}/issues/{cr_id}/comments", data={"body": body})
         return Note(c["id"], c["user"]["login"], c.get("body") or "", c.get("created_at", ""))
 
+    def edit_note(self, cr_id: int, note_id: int, body: str) -> Note:
+        """Replace the body of a comment ferry posted (#89). Raises GitHubError (404 if it was deleted)."""
+        c = self.client.request("PATCH", f"{self._r}/issues/comments/{int(note_id)}", data={"body": body})
+        return Note(c["id"], c["user"]["login"], c.get("body") or "", c.get("created_at", ""))
+
+    def react(self, cr_id: int, note_id: int, emoji: str = "eyes") -> None:
+        """A reaction on a PR comment (#89): GitHub's reaction names (`eyes`, `+1`, ...)."""
+        self.client.request("POST", f"{self._r}/issues/comments/{int(note_id)}/reactions", data={"content": emoji})
+
     def bot_username(self) -> str:
         if self._bot is None:
             self._bot = self.client.request("GET", "/user")["login"]

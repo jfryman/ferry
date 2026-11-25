@@ -171,6 +171,40 @@ the help text with what ferry did not understand. Help replies are limited to on
 **Access is checked before a job exists.** A command from someone without write access is refused
 in the webhook handler. It costs one API call and no credential.
 
+## Progress on the change
+
+As soon as ferry queues a plan, an apply or a `/ferry unlock`, it posts one comment on the change
+(the ack), and edits that same comment as the job goes:
+
+1. `⏳ ferry plan: homelab @ abc12345 queued (job 42)`, within a second or two of the webhook.
+   The job number is its id in `GET /jobs` once it finishes.
+2. `⚙️ ... running (job 42)`, when the worker starts it.
+3. The full result: the plan or apply comment, or the refusal (not approved, locked, the head
+   moved). The hidden plan record is on its last line, as in a new comment, so the apply gates
+   read it the same way.
+
+The comment that asked for the job also gets an 👀 reaction (GitHub) or award emoji (GitLab). With
+[commit statuses](#commit-statuses) on, `ferry/plan: <inventory>` and `ferry/apply: <inventory>`
+say `queued` and then `running` at the same moments.
+
+A job writes a new comment instead when:
+
+- the ack can't be edited (deleted, or the code host refuses the edit), or couldn't be posted;
+- it has more to say than one comment: the second inventory of a plan, an apply that stops before
+  the next inventory;
+- a job queued before it already wrote a new comment. The newest plan or `/ferry unlock` comment
+  must be the one that ran last, so a result never lands above a newer one. The ack then says
+  where the result is.
+
+An automatic plan of a change into a branch ferry doesn't handle gets no ack, as it gets no
+comment. An automatic plan that ends up not running (the change moved on, or automatic plans were
+switched off while it waited) edits its ack to say so.
+
+**Restarts.** The queue is in memory. When the service starts, it edits the acks of jobs the last
+run left queued ("nothing ran") or running ("may have stopped part-way"), and records them as
+`error`. Run the command again. The ack's comment id is stored with the job in the state file;
+`/jobs` doesn't show it, and lists jobs only once they finish.
+
 ## Credentials from OpenBao
 
 Set `FERRY_OPENBAO_ADDR` and `FERRY_OPENBAO_JWT_FILE` to give each job its own credentials:
@@ -292,8 +326,11 @@ inventory:
 
 | Status | pending | success | failure |
 |---|---|---|---|
-| `ferry/plan: <inventory>` | Planning | The plan is clean, or no host is affected | Not clean, or refused |
-| `ferry/apply: <inventory>` | Planned and not applied yet, or applying | Applied, or nothing to apply | The apply had failures |
+| `ferry/plan: <inventory>` | Queued or running | The plan is clean, or no host is affected | Not clean, refused, or not run |
+| `ferry/apply: <inventory>` | Planned and not applied yet, queued, running, or not applied | Applied, or nothing to apply | The apply had failures |
+
+The `queued` status needs to know the inventories, so it starts after the first job has read
+`ferry.yaml` (or when the command names one).
 
 A new push has no statuses until ferry plans it. So a required `ferry/apply: <inventory>` blocks
 the merge until that exact head is applied.

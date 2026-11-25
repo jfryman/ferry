@@ -274,6 +274,17 @@ class GitLabBackend:
         n = self.client.request("POST", f"{self._p}/merge_requests/{cr_id}/notes", data={"body": body})
         return Note(n["id"], n["author"]["username"], n.get("body", ""), n.get("created_at", ""))
 
+    def edit_note(self, cr_id: int, note_id: int, body: str) -> Note:
+        """Replace the body of a note ferry posted (#89). Raises GitLabError (404 if it was deleted)."""
+        n = self.client.request("PUT", f"{self._p}/merge_requests/{int(cr_id)}/notes/{int(note_id)}",
+                                data={"body": body})
+        return Note(n["id"], n["author"]["username"], n.get("body", ""), n.get("created_at", ""))
+
+    def react(self, cr_id: int, note_id: int, emoji: str = "eyes") -> None:
+        """An award emoji on an MR note (#89)."""
+        self.client.request("POST", f"{self._p}/merge_requests/{int(cr_id)}/notes/{int(note_id)}/award_emoji",
+                            data={"name": emoji})
+
     def bot_username(self) -> str:
         if self._bot is None:
             self._bot = self.client.request("GET", "/user")["username"]

@@ -153,6 +153,12 @@ The plan record must be the last line of a comment by ferry's own account, and u
 it carries an HMAC. Text that comes from the change or from hosts is escaped before it is posted,
 and comment size is bounded ([#24](https://github.com/jfryman/ferry/issues/24)).
 
+ferry edits its own ack comments into results ([#89](https://github.com/jfryman/ferry/issues/89)).
+An edited comment keeps its place in the list, and the apply gates take the newest record by
+place, so ferry keeps the acks in the order the jobs run, and a job queued before a result that had
+to go to a new comment writes a new comment too. Someone who can edit ferry's comments (a GitHub
+repository admin) can't forge a record: the HMAC still has to match. Acks carry no record.
+
 ### Unauthorized users spend credentials
 
 Write access is checked in the webhook handler, before a job exists. All apply gates run before

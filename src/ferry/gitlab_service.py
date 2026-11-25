@@ -117,7 +117,7 @@ class GitLabService(Service):
         if new_commits and pusher != cr.author and not self.vcs.can_apply(pusher):
             self._say_waiting(iid, sha, pusher, who="pushes from users")
             return 202, "waiting for /ferry plan"
-        return self._enqueue(Job("plan", iid, sha, cr.author, delivery=delivery))
+        return self._enqueue(Job("plan", iid, sha, cr.author, delivery=delivery, base=cr.target_branch))
 
     def _on_note(self, p: dict, delivery: str) -> tuple[int, str]:
         note = p.get("object_attributes") or {}
@@ -142,7 +142,8 @@ class GitLabService(Service):
             dispatch = lambda: self._on_note_command(p, m, delivery)  # noqa: E731
         else:
             dispatch = lambda: self._on_other_command(  # noqa: E731
-                int(p["merge_request"]["iid"]), user, kind, m, text.splitlines()[0], delivery)
+                int(p["merge_request"]["iid"]), user, kind, m, text.splitlines()[0], delivery,
+                comment_id=note["id"])
         return self._once(self._comment_key("note", project, note["id"]), dispatch)
 
     def _on_note_command(self, p: dict, m, delivery: str) -> tuple[int, str]:
@@ -167,7 +168,8 @@ class GitLabService(Service):
         sha = self._pin_head(cr, action, parse_time(note["created_at"]), named, payload_head)
         if sha is None:
             return 202, f"{action} refused: the head isn't the one commented on"
-        return self._enqueue(Job(action, iid, sha, user, inventory, delivery, pinned=True))
+        return self._enqueue(Job(action, iid, sha, user, inventory, delivery, pinned=True,
+                                 comment_id=note["id"]))
 
     def _head_since(self, number: int, sha: str) -> float | None:
         try:
